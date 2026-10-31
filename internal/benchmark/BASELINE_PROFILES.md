@@ -5,7 +5,7 @@ the sample's Images List, Scaffold, Credit Card, Glass Product, and Glass Playgr
 runs on both AOSP managed devices: `pixel5Api30` (API 30) and `pixel5Api34` (API 34). The profile
 filter is limited to Haze-owned packages under `dev.chrisbanes.haze.**`.
 
-Generation requires JDK 21 and an Android SDK selected by `ANDROID_HOME` or `ANDROID_SDK_ROOT`.
+Generation requires JDK 25 and an Android SDK selected by `ANDROID_HOME` or `ANDROID_SDK_ROOT`.
 Verify the environment with `java -version`, `echo "$ANDROID_HOME"` (or
 `echo "$ANDROID_SDK_ROOT"`), and `command -v sdkmanager`; the latter checks that SDK package
 management tooling is available, while Gradle uses the configured SDK environment. The managed-

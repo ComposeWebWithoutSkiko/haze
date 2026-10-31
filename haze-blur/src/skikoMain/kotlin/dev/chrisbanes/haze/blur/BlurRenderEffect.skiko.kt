@@ -12,11 +12,8 @@ import dev.chrisbanes.haze.InternalHazeApi
 import dev.chrisbanes.haze.PlatformContext
 import dev.chrisbanes.haze.PlatformRenderEffect
 import dev.chrisbanes.haze.createBlendRenderEffect
-import dev.chrisbanes.haze.createColorFilterRenderEffect
 import dev.chrisbanes.haze.createFractalNoiseShader
 import dev.chrisbanes.haze.createShaderRenderEffect
-import org.jetbrains.skia.ColorFilter
-import org.jetbrains.skia.ColorMatrix
 
 private val NOISE_SHADER by lazy(LazyThreadSafetyMode.NONE) {
   createFractalNoiseShader(
@@ -41,20 +38,7 @@ internal actual fun createNoiseEffect(
   mask: Shader?,
   scale: Float,
 ): PlatformRenderEffect {
-  val source = createShaderRenderEffect(NOISE_SHADER)
-
-  val noiseEffect = if (noiseFactor < 1f) {
-    val matrix = ColorMatrix(
-      1f, 0f, 0f, 0f, 0f,
-      0f, 1f, 0f, 0f, 0f,
-      0f, 0f, 1f, 0f, 0f,
-      0f, 0f, 0f, noiseFactor, 0f,
-    )
-
-    createColorFilterRenderEffect(ColorFilter.makeMatrix(matrix), source)
-  } else {
-    source
-  }
+  val noiseEffect = createShaderRenderEffect(NOISE_SHADER).withAlpha(noiseFactor)
 
   return when {
     mask != null -> {

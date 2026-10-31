@@ -6,6 +6,6 @@ package dev.chrisbanes.haze.blur
 import androidx.compose.ui.graphics.Paint
 import androidx.compose.ui.graphics.nativePaint
 
-internal actual fun Paint.reset() {
+internal fun Paint.reset() {
   nativePaint.reset()
 }

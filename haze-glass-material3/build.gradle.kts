@@ -20,7 +20,7 @@ kotlin {
     withHostTest {}
   }
 
-  addDefaultHazeTargets(project)
+  addDefaultHazeTargets(project, withWeb = false)
   explicitApi()
 
   sourceSets {

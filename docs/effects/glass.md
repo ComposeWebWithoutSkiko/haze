@@ -4,6 +4,8 @@ A refraction-driven Glass effect that combines refraction, depth blur, tint, Fre
 
 ![type:video](../media/glass.mp4)
 
+Glass has no web target: `haze-glass` and `haze-glass-material3` support Android, Desktop, iOS and macOS.
+
 ## Download
 
 Glass is published to Maven Central starting with Haze `2.0.0-alpha04`. Use the same version for

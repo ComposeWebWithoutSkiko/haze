@@ -119,7 +119,6 @@ include(
   ":sample:screenshot-tests",
   ":sample:android",
   ":sample:desktop",
-  ":sample:web",
 )
 
 // Kotlin/Native macOS executables can only be built on an Apple host.

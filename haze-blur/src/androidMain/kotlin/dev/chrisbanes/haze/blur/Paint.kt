@@ -9,8 +9,6 @@ private const val MAX_PAINT_POOL_SIZE = 3
 
 internal val PaintPool: ArrayDeque<Paint> = ArrayDeque(MAX_PAINT_POOL_SIZE)
 
-internal expect fun Paint.reset()
-
 internal inline fun <R> ArrayDeque<Paint>.usePaint(block: (Paint) -> R): R {
   val paint = removeLastOrNull() ?: Paint()
   return try {

@@ -24,7 +24,7 @@ kotlin {
     }
   }
 
-  addDefaultHazeTargets(project, withSkikoMain = true)
+  addDefaultHazeTargets(project, withSkikoMain = true, withWeb = false)
 
   sourceSets {
     val kameraMain = create("kameraMain") {
@@ -109,30 +109,6 @@ kotlin {
       dependencies {
         implementation(compose.desktop.currentOs)
         implementation(libs.kotlinx.coroutines.swing)
-      }
-    }
-
-    named("wasmJsMain") {
-      dependencies {
-        implementation(npm("ws", "8.18.3"))
-      }
-    }
-
-    named("jsMain") {
-      dependencies {
-        implementation(npm("ws", "8.18.3"))
-      }
-    }
-
-    named("wasmJsTest") {
-      dependencies {
-        implementation(npm("ws", "8.18.3"))
-      }
-    }
-
-    named("jsTest") {
-      dependencies {
-        implementation(npm("ws", "8.18.3"))
       }
     }
   }

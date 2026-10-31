@@ -39,7 +39,8 @@ kotlin {
     }
   }
 
-  addDefaultHazeTargets(project, withSkikoMain = true)
+  // Glass is made of runtime shaders, which the web has no way to run.
+  addDefaultHazeTargets(project, withSkikoMain = true, withWeb = false)
   explicitApi()
 
   sourceSets {

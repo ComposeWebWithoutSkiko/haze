@@ -32,8 +32,8 @@ The blur effect is supported on all platforms with platform-optimized implementa
 | Android       | ✅        | API 11+, optimized for API 13+      |
 | Desktop (JVM) | ✅        | Skia-based shader implementation    |
 | iOS           | ✅        | Skia-based shader implementation    |
-| Wasm          | ✅        | Custom shader implementation        |
-| JS/Canvas     | ✅        | Canvas filter-based                 |
+| Wasm          | ✅        | Canvas 2D filter-based              |
+| JS/Canvas     | ✅        | Canvas 2D filter-based              |
 
 ## Basic Usage
 

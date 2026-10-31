@@ -14,7 +14,8 @@ import androidx.compose.ui.graphics.TileMode
 /**
  * Platform-specific render effect type.
  * - On Android (API 31+): `android.graphics.RenderEffect`
- * - On Skiko: `org.jetbrains.skia.ImageFilter`
+ * - On Skia: `org.jetbrains.skia.ImageFilter`
+ * - On the web: a Compose `RenderEffect`, applied through Canvas 2D
  */
 @InternalHazeApi
 public expect class PlatformRenderEffect
@@ -22,7 +23,8 @@ public expect class PlatformRenderEffect
 /**
  * Platform-specific color filter type.
  * - On Android: `android.graphics.ColorFilter`
- * - On Skiko: `org.jetbrains.skia.ColorFilter`
+ * - On Skia: `org.jetbrains.skia.ColorFilter`
+ * - On the web: a Compose `ColorFilter`
  */
 @InternalHazeApi
 public expect class PlatformColorFilter

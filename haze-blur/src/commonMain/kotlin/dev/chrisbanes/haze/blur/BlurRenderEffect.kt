@@ -150,7 +150,8 @@ internal expect fun createCombinedNoiseTintRenderEffectOrNull(
 /**
  * Creates the platform-specific noise effect.
  * - On Android: Uses a bitmap texture shader
- * - On Skiko: Uses a fractal noise shader
+ * - On Skia: Uses a fractal noise shader
+ * - On the web: Uses a tile of seeded noise
  */
 internal expect fun createNoiseEffect(
   context: PlatformContext,
@@ -184,6 +185,21 @@ private fun PlatformRenderEffect.withColorEffect(
 }
 
 /**
+ * Multiplies the alpha of this effect by [alpha], wrapping it in a ColorFilter. Decided on the 8-bit
+ * alpha of the filter's color, not on [alpha]: an opaque color changes nothing, and Skia makes no
+ * filter for it.
+ */
+internal fun PlatformRenderEffect.withAlpha(alpha: Float): PlatformRenderEffect {
+  val color = Color.Black.copy(alpha = alpha).toArgb()
+  if (color ushr 24 == 0xFF) return this
+
+  return createColorFilterRenderEffect(
+    colorFilter = createBlendColorFilter(color = color, blendMode = BlendMode.DstIn),
+    input = this,
+  )
+}
+
+/**
  * Applies a brush-based tint with optional mask.
  *
  * Order: brush → alphaModulate → mask → blend
@@ -197,18 +213,7 @@ private fun PlatformRenderEffect.withBrushTint(
 ): PlatformRenderEffect {
   val tintBrush = effect.brush.toShader(size) ?: return this
 
-  val brushEffect = if (alphaModulate >= 1f) {
-    createShaderRenderEffect(tintBrush)
-  } else {
-    // If we need to modulate the alpha, wrap it in a ColorFilter
-    createColorFilterRenderEffect(
-      colorFilter = createBlendColorFilter(
-        color = Color.Black.copy(alpha = alphaModulate).toArgb(),
-        blendMode = BlendMode.DstIn,
-      ),
-      input = createShaderRenderEffect(tintBrush),
-    )
-  }
+  val brushEffect = createShaderRenderEffect(tintBrush).withAlpha(alphaModulate)
 
   return applyMaskAndBlend(
     baseEffect = brushEffect,

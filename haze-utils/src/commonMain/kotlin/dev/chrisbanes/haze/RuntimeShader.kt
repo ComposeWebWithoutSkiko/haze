@@ -9,7 +9,8 @@ import androidx.compose.ui.graphics.Shader
 /**
  * Platform-specific runtime effect type for compiling shaders.
  * - On Android (API 33+): Uses `android.graphics.RuntimeShader` directly
- * - On Skiko: `org.jetbrains.skia.RuntimeEffect`
+ * - On Skia: `org.jetbrains.skia.RuntimeEffect`
+ * - On the web: never made, as browsers don't run SkSL
  */
 @InternalHazeApi
 public expect class PlatformRuntimeEffect

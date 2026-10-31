@@ -4,15 +4,10 @@ set -eu
 
 ./gradlew \
     --no-scan \
-    :internal:dokka:dokkaGenerate \
-    :sample:web:wasmJsBrowserDistribution
+    :internal:dokka:dokkaGenerate
 
 rm -rf docs/api/
 cp -r internal/dokka/build/dokka/html/ docs/api/
-
-rm -rf docs/sample/
-mkdir -p docs/sample
-cp -r sample/web/build/dist/wasmJs/productionExecutable/ docs/sample/wasm/
 
 cp CHANGELOG.md docs/changelog.md
 

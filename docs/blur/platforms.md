@@ -88,7 +88,11 @@ macOS is a Compose Multiplatform target which is built upon [Skiko][skiko], so s
 
 ## Web
 
-Compose for Web is based on Kotlin/Wasm, and is a Compose Multiplatform target which is built upon [Skiko][skiko], so see the [Skiko](#skiko) docs below.
+The web targets (Kotlin/Wasm and Kotlin/JS) of this fork aren't built upon Skiko: Compose draws through the Canvas 2D API of the browser. The [Skiko](#skiko) docs below don't apply to them.
+
+- Blur, tints, masks and progressive blur work on both targets. `RuntimeShader` isn't available, so at a full-resolution tier, linear gradient progressive effects are implemented by drawing the effect multiple times. Downsampled tiers and non-linear progressive types use a mask instead.
+- Noise is a tile of seeded noise: `baseFrequency` and `numOctaves` don't apply to it.
+- Glass has no web target.
 
 ## Skiko
 

@@ -9,6 +9,7 @@ import org.gradle.api.Project
 import org.gradle.kotlin.dsl.configure
 import org.gradle.kotlin.dsl.getByType
 import org.gradle.kotlin.dsl.withType
+import org.jetbrains.kotlin.gradle.ExperimentalWasmDsl
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.dsl.KotlinMultiplatformExtension
 import org.jetbrains.kotlin.gradle.targets.js.testing.KotlinJsTest
@@ -54,9 +55,38 @@ class KotlinMultiplatformConventionPlugin : Plugin<Project> {
       enabled = false
     }
 
+    useComposeWebCanvasOnTheWeb()
+
     configureSpotless()
   }
 }
+
+/**
+ * Resolves Compose to the fork that draws with the browser for the web targets, which have no Skia
+ * to draw with. The other targets stay on the Compose of the catalog.
+ */
+private fun Project.useComposeWebCanvasOnTheWeb() {
+  val version = libs.findVersion("compose-web-canvas").get().requiredVersion
+  configurations.configureEach {
+    if (name.startsWith("js") || name.startsWith("wasmJs") || name.startsWith("web")) {
+      resolutionStrategy.eachDependency {
+        if (requested.group in COMPOSE_WEB_CANVAS_GROUPS) {
+          useVersion(version)
+        }
+      }
+    }
+  }
+}
+
+/** The groups that the fork of Compose publishes. */
+private val COMPOSE_WEB_CANVAS_GROUPS = setOf(
+  "org.jetbrains.compose.animation",
+  "org.jetbrains.compose.foundation",
+  "org.jetbrains.compose.material",
+  "org.jetbrains.compose.material3",
+  "org.jetbrains.compose.runtime",
+  "org.jetbrains.compose.ui",
+)
 
 /**
  * Whether the Apple (iOS + macOS) Kotlin/Native targets are configured for this build.
@@ -69,6 +99,7 @@ val Project.appleTargetsEnabled: Boolean
 fun KotlinMultiplatformExtension.addDefaultHazeTargets(
   project: Project,
   withSkikoMain: Boolean = false,
+  withWeb: Boolean = true,
 ) {
   jvm()
 
@@ -78,28 +109,37 @@ fun KotlinMultiplatformExtension.addDefaultHazeTargets(
     macosArm64()
   }
 
-  @OptIn(org.jetbrains.kotlin.gradle.ExperimentalWasmDsl::class)
-  wasmJs {
-    browser()
-    binaries.executable()
-  }
+  if (withWeb) {
+    @OptIn(ExperimentalWasmDsl::class)
+    wasmJs {
+      browser()
+      binaries.executable()
+    }
 
-  js {
-    browser()
-    binaries.executable()
+    js {
+      browser()
+      binaries.executable()
+    }
   }
 
   if (withSkikoMain) {
+    // skikoMain has what every target but Android shares. skiaMain has what needs Skia itself,
+    // which the web targets don't have: they draw with the browser.
     val skikoMain = sourceSets.maybeCreate("skikoMain").apply {
       dependsOn(sourceSets.getByName("commonMain"))
     }
+    val skiaMain = sourceSets.maybeCreate("skiaMain").apply {
+      dependsOn(skikoMain)
+    }
     if (project.appleTargetsEnabled) {
       // appleMain is the common parent of iosMain and macosMain, both of which render via Skiko.
-      sourceSets.getByName("appleMain").dependsOn(skikoMain)
+      sourceSets.getByName("appleMain").dependsOn(skiaMain)
     }
-    sourceSets.getByName("jvmMain").dependsOn(skikoMain)
-    sourceSets.getByName("wasmJsMain").dependsOn(skikoMain)
-    sourceSets.getByName("jsMain").dependsOn(skikoMain)
+    sourceSets.getByName("jvmMain").dependsOn(skiaMain)
+    if (withWeb) {
+      sourceSets.getByName("wasmJsMain").dependsOn(skikoMain)
+      sourceSets.getByName("jsMain").dependsOn(skikoMain)
+    }
   }
 }
 

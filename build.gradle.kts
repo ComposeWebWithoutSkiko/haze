@@ -2,10 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 
-import org.gradle.api.file.DuplicatesStrategy
-import org.gradle.api.tasks.AbstractCopyTask
 import org.jetbrains.dokka.gradle.DokkaExtension
-import org.jetbrains.kotlin.gradle.targets.js.ir.DefaultIncrementalSyncTask
 import org.jetbrains.kotlin.gradle.targets.js.npm.tasks.KotlinNpmInstallTask
 
 plugins {
@@ -64,31 +61,13 @@ subprojects {
     }
   }
 
-  tasks.withType<AbstractCopyTask>().configureEach {
-    if (name.endsWith("TestDevelopmentExecutableCompileSync")) {
-      // Kotlin/JS copies duplicate Skiko runtime files from main and test resources.
-      duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-    }
-  }
-
-  afterEvaluate {
-    tasks.withType<DefaultIncrementalSyncTask>().configureEach {
-      if (name.endsWith("TestDevelopmentExecutableCompileSync")) {
-        // Kotlin/JS configures these tasks after the root project configures subprojects.
-        duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-      }
-    }
-  }
-
   dependencies {
     components {
       listOf(
         "coil-core-iosarm64",
         "coil-core-iossimulatorarm64",
-        "coil-core-js",
         "coil-core-jvm",
         "coil-core-macosarm64",
-        "coil-core-wasm-js",
       ).forEach { module ->
         withModule("io.coil-kt.coil3:$module") {
           allVariants {

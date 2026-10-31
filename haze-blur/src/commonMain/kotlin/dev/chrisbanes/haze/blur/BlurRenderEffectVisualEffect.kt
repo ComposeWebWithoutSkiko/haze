@@ -15,16 +15,20 @@ import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.roundToIntSize
+import androidx.compose.ui.unit.takeOrElse
 import androidx.compose.ui.util.lerp
 import dev.chrisbanes.haze.ExperimentalHazeApi
 import dev.chrisbanes.haze.HazeEffectInputSnapshot
 import dev.chrisbanes.haze.HazeEffectLifecycleScope
 import dev.chrisbanes.haze.HazeEffectRuntimeDrawScope
+import dev.chrisbanes.haze.HazeLogger
 import dev.chrisbanes.haze.HazeProgressive as RootHazeProgressive
 import dev.chrisbanes.haze.InternalHazeApi
 import dev.chrisbanes.haze.Poko
 import dev.chrisbanes.haze.TrimMemoryLevel
+import dev.chrisbanes.haze.asBrush
 import dev.chrisbanes.haze.asComposeRenderEffect
+import dev.chrisbanes.haze.withGraphicsLayer
 import kotlin.math.ceil
 
 @OptIn(ExperimentalHazeApi::class, InternalHazeApi::class)
@@ -220,6 +224,91 @@ internal expect fun RenderEffectBlurVisualEffectDelegate.drawProgressiveEffect(
   context: HazeEffectRuntimeDrawScope,
   inputScale: Float,
 )
+
+/** Draws [progressive] for the platforms that can't run the runtime shader of the blur. */
+@OptIn(ExperimentalHazeApi::class, InternalHazeApi::class)
+internal fun RenderEffectBlurVisualEffectDelegate.drawProgressiveEffectWithoutRuntimeShader(
+  drawScope: DrawScope,
+  progressive: RootHazeProgressive,
+  contentLayer: GraphicsLayer,
+  context: HazeEffectRuntimeDrawScope,
+  inputScale: Float,
+) {
+  if (
+    progressive is RootHazeProgressive.LinearGradient &&
+    shouldDrawProgressiveWithLayers(progressive, inputScale)
+  ) {
+    // Full-resolution linear gradients use our slower, layered approximation.
+    drawLinearGradientProgressiveEffectUsingLayers(
+      drawScope = drawScope,
+      progressive = progressive,
+      contentLayer = contentLayer,
+      context = context,
+      inputScale = inputScale,
+    )
+  } else {
+    // Otherwise draw the masked blur over its input, preserving unblurred regions.
+    with(drawScope) {
+      contentLayer.renderEffect = blurVisualEffect
+        .getOrCreateRenderEffect(
+          context = context,
+          inputScale = inputScale,
+          mask = progressive.asBrush(),
+          retainInputWhenMasked = progressive is RootHazeProgressive.LinearGradient,
+        )
+        .asComposeRenderEffect()
+      contentLayer.alpha = blurVisualEffect.alpha
+
+      // Finally draw the layer
+      drawLayer(contentLayer)
+    }
+  }
+}
+
+@OptIn(ExperimentalHazeApi::class, InternalHazeApi::class)
+private fun RenderEffectBlurVisualEffectDelegate.drawLinearGradientProgressiveEffectUsingLayers(
+  drawScope: DrawScope,
+  progressive: RootHazeProgressive.LinearGradient,
+  contentLayer: GraphicsLayer,
+  context: HazeEffectRuntimeDrawScope,
+  inputScale: Float,
+) = with(drawScope) {
+  // The retained capture may have been drawn through the ordinary or masked path.
+  // Record the unprocessed input so its prior effect and alpha do not compound here.
+  contentLayer.renderEffect = null
+  contentLayer.alpha = 1f
+
+  val colorEffects = blurVisualEffect.colorEffects
+  val noiseFactor = blurVisualEffect.noiseFactor
+  val blurRadius = blurVisualEffect.blurRadius.takeOrElse { 0.dp }
+
+  drawProgressiveWithMultipleLayers(progressive) { mask, intensity ->
+    context.withGraphicsLayer { layer ->
+      layer.record(contentLayer.size) {
+        drawLayer(contentLayer)
+      }
+
+      HazeLogger.d(RenderEffectBlurVisualEffectDelegate.TAG) {
+        "drawLinearGradientProgressiveEffectUsingLayers. mask=$mask, intensity=$intensity"
+      }
+
+      layer.renderEffect = blurVisualEffect
+        .getOrCreateRenderEffect(
+          context = context,
+          inputScale = inputScale,
+          blurRadius = blurRadius * intensity,
+          noiseFactor = noiseFactor,
+          colorEffects = colorEffects.orEmpty(),
+          colorEffectsAlphaModulate = intensity,
+          mask = mask,
+        )
+        .asComposeRenderEffect()
+      layer.alpha = blurVisualEffect.alpha
+
+      drawLayer(layer)
+    }
+  }
+}
 
 internal fun shouldDrawProgressiveWithLayers(
   progressive: RootHazeProgressive,

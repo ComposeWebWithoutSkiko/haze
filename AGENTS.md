@@ -9,7 +9,7 @@ in `sample/`; library screenshots in `haze-screenshot-tests`, sample screenshots
 
 - Use `rg` and `rg --files` for searches. Use worktrees or subagents when isolation or independent
   work makes them worthwhile; keep validation proportional to the change.
-- Use Java 21. Agent-invoked Gradle commands must use `--no-scan` unless a Build Scan is explicitly
+- Use Java 25. Agent-invoked Gradle commands must use `--no-scan` unless a Build Scan is explicitly
   authorized. Preserve the repository's configured CI Build Scan behaviour.
   Validate the affected behavior before opening a PR. Prefer targeted module tasks for code changes;
   run `./gradlew check --no-scan` when the scope or integration risk warrants repository-wide checks.

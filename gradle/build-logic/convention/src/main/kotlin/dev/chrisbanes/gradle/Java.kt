@@ -13,8 +13,8 @@ import org.gradle.kotlin.dsl.withType
 fun Project.configureJava() {
   java {
     toolchain {
-      // Build with JDK 21
-      languageVersion.set(JavaLanguageVersion.of(21))
+      // Build with JDK 25
+      languageVersion.set(JavaLanguageVersion.of(25))
     }
   }
 

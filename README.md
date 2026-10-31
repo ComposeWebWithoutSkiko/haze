@@ -22,7 +22,7 @@ Haze 2.0 is currently in beta. If you are upgrading from Haze 1.x or an earlier 
 | Desktop (JVM) | ✅ |
 | iOS | ✅ |
 | macOS | ✅ |
-| Wasm / JS | ✅ |
+| Wasm / JS | ✅ Canvas 2D, without Glass |
 
 ## Modules
 

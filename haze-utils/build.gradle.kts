@@ -33,5 +33,11 @@ kotlin {
         implementation(libs.androidx.tracing)
       }
     }
+
+    webMain {
+      dependencies {
+        implementation(libs.compose.ui.web.canvas)
+      }
+    }
   }
 }
