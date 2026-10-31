@@ -28,6 +28,13 @@ dependencyResolutionManagement {
     // maven("https://maven.pkg.jetbrains.space/public/p/compose/dev")
 
     mavenLocal()
+
+    // The fork of Compose Multiplatform for the web targets
+    maven("https://repo.redlance.org/public") {
+      content {
+        includeVersionByRegex("org\\.jetbrains\\.compose.*", ".*", ".*-webcanvas.*")
+      }
+    }
   }
 }
 

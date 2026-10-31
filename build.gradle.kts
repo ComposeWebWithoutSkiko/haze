@@ -43,6 +43,21 @@ tasks.withType<KotlinNpmInstallTask>().configureEach {
 }
 
 subprojects {
+  pluginManager.withPlugin("maven-publish") {
+    extensions.configure<PublishingExtension> {
+      repositories {
+        maven {
+          name = "ComposeRepo"
+          setUrl(System.getenv("COMPOSE_REPO_URL"))
+          credentials {
+            username = System.getenv("COMPOSE_REPO_USERNAME")
+            password = System.getenv("COMPOSE_REPO_KEY")
+          }
+        }
+      }
+    }
+  }
+
   pluginManager.withPlugin("org.jetbrains.dokka") {
     extensions.configure<DokkaExtension> {
       dokkaPublications.configureEach {
