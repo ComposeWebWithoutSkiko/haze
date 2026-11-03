@@ -6,22 +6,21 @@ package dev.chrisbanes.haze.glass
 import androidx.compose.foundation.interaction.InteractionSource
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Stable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.referentialEqualityPolicy
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
-import dev.chrisbanes.haze.ExperimentalHazeApi
 import dev.chrisbanes.haze.HazeLogger
 import dev.chrisbanes.haze.InternalHazeApi
 
-/** Mutable style and interaction state owned by one [GlassRuntimeEffect]. */
-@ExperimentalHazeApi
+/**
+ * Mutable style and interaction state owned by one [GlassRuntimeEffect].
+ *
+ * Fields are plain, not snapshot state: changes go through markDirty, so dirtyTrackerSignal is the
+ * only observed signal.
+ */
 @Stable
 @OptIn(InternalHazeApi::class)
-@Suppress("ktlint:standard:property-naming")
 internal abstract class GlassRuntimeState {
   protected constructor()
 
@@ -38,9 +37,10 @@ internal abstract class GlassRuntimeState {
   internal var nextInteractionRevision: Long = 0L
 
   // A Style contains only declarations. Each attached effect owns these evaluated slots.
-  private var styleHoveredSlot: GlassInteractionSlot? by mutableStateOf(null)
-  private var styleFocusedSlot: GlassInteractionSlot? by mutableStateOf(null)
-  private var stylePressedSlot: GlassInteractionSlot? by mutableStateOf(null)
+  // Deliberately not snapshot state: they are written inside the observed update() that reads them.
+  private var styleHoveredSlot: GlassInteractionSlot? = null
+  private var styleFocusedSlot: GlassInteractionSlot? = null
+  private var stylePressedSlot: GlassInteractionSlot? = null
 
   private var interactionSlotsSnapshot: GlassInteractionSlots = GlassInteractionSlots()
   private var currentInteractionTopology = interactionSlotsSnapshot.resolveInteractionTopology()
@@ -54,17 +54,11 @@ internal abstract class GlassRuntimeState {
   internal open val observesPointerEvents: Boolean
     get() = interactionSlotsSnapshot.hovered != null || interactionSlotsSnapshot.pressed != null
 
-  internal var _interactionSource: InteractionSource? by mutableStateOf(
-    null,
-    referentialEqualityPolicy(),
-  )
-
-  public var interactionSource: InteractionSource?
-    get() = _interactionSource
+  public var interactionSource: InteractionSource? = null
     set(value) {
-      if (_interactionSource !== value) {
-        HazeLogger.d(TAG) { "interactionSource changed. Current: $_interactionSource. New: $value" }
-        _interactionSource = value
+      if (field !== value) {
+        HazeLogger.d(TAG) { "interactionSource changed. Current: $field. New: $value" }
+        field = value
         onInteractionConfigurationChanged()
       }
     }
@@ -72,30 +66,20 @@ internal abstract class GlassRuntimeState {
   internal val interactionLightRadiusFraction: Float
     get() = inheritedStyleValues.interactionLightRadiusFraction
 
-  internal var _interactionTransformTarget: GlassTransformTarget by mutableStateOf(
-    GlassTransformTarget.MaterialOnly,
-  )
-
-  public var interactionTransformTarget: GlassTransformTarget
-    get() = _interactionTransformTarget
+  public var interactionTransformTarget: GlassTransformTarget = GlassTransformTarget.MaterialOnly
     set(value) {
-      if (_interactionTransformTarget != value) {
-        HazeLogger.d(TAG) { "interactionTransformTarget changed. Current: $_interactionTransformTarget. New: $value" }
-        _interactionTransformTarget = value
+      if (field != value) {
+        HazeLogger.d(TAG) { "interactionTransformTarget changed. Current: $field. New: $value" }
+        field = value
         onInteractionConfigurationChanged()
       }
     }
 
-  internal var _interactionTransformPivot: GlassTransformPivot by mutableStateOf(
-    GlassTransformPivot.Pointer,
-  )
-
-  public var interactionTransformPivot: GlassTransformPivot
-    get() = _interactionTransformPivot
+  public var interactionTransformPivot: GlassTransformPivot = GlassTransformPivot.Pointer
     set(value) {
-      if (_interactionTransformPivot != value) {
-        HazeLogger.d(TAG) { "interactionTransformPivot changed. Current: $_interactionTransformPivot. New: $value" }
-        _interactionTransformPivot = value
+      if (field != value) {
+        HazeLogger.d(TAG) { "interactionTransformPivot changed. Current: $field. New: $value" }
+        field = value
         onInteractionConfigurationChanged()
       }
     }
@@ -103,16 +87,11 @@ internal abstract class GlassRuntimeState {
   internal val interactionPositionAnimationSpec
     get() = inheritedStyleValues.interactionPositionAnimationSpec
 
-  internal var _interactionReducedMotionPolicy: GlassReducedMotionPolicy by mutableStateOf(
-    GlassReducedMotionPolicy.System,
-  )
-
-  public var interactionReducedMotionPolicy: GlassReducedMotionPolicy
-    get() = _interactionReducedMotionPolicy
+  public var interactionReducedMotionPolicy: GlassReducedMotionPolicy = GlassReducedMotionPolicy.System
     set(value) {
-      if (_interactionReducedMotionPolicy != value) {
-        HazeLogger.d(TAG) { "interactionReducedMotionPolicy changed. Current: $_interactionReducedMotionPolicy. New: $value" }
-        _interactionReducedMotionPolicy = value
+      if (field != value) {
+        HazeLogger.d(TAG) { "interactionReducedMotionPolicy changed. Current: $field. New: $value" }
+        field = value
         onInteractionConfigurationChanged()
       }
     }
@@ -179,7 +158,10 @@ internal abstract class GlassRuntimeState {
   internal val surfaceProfile: SurfaceProfile get() = inheritedStyleValues.surfaceProfile
   internal val chromaticAberrationMode: ChromaticAberrationMode get() = inheritedStyleValues.chromaticAberrationMode
   internal val shape: RoundedCornerShape get() = inheritedStyleValues.shape
-  internal val alpha: Float get() = inheritedStyleValues.alpha
+  internal open val alpha: Float get() = inheritedStyleValues.alpha * transitionAlpha
+
+  /** The authored alpha, without [transitionAlpha]. */
+  internal val styleAlpha: Float get() = inheritedStyleValues.alpha
   internal val contrast: Float get() = inheritedStyleValues.contrast
   internal val whitePoint: Float get() = inheritedStyleValues.whitePoint
   internal val chromaMultiplier: Float get() = inheritedStyleValues.chromaMultiplier
@@ -189,7 +171,7 @@ internal abstract class GlassRuntimeState {
 
   internal var style: GlassStyle = GlassStyle
     set(value) {
-      if (field !== value) {
+      if (field != value) {
         HazeLogger.d(TAG) { "style changed. Current: $field. New: $value" }
         field = value
         updateInheritedStyleValues()
@@ -197,10 +179,38 @@ internal abstract class GlassRuntimeState {
       }
     }
 
+  /** Members drawn as one surface by a Glass container (ADR-0013), or null for one surface. */
+  internal var mergedField: GlassMergedField? = null
+    set(value) {
+      if (field != value) {
+        field = value
+        markDirty(GlassDirtyFields.MergedField)
+      }
+    }
+
+  /** Optics alone use the common container size; singletons retain their ordinary shader. */
+  internal var opticalSizeOverride: Size? = null
+    set(value) {
+      if (field != value) {
+        field = value
+        markDirty(GlassDirtyFields.OpticalSize)
+      }
+    }
+
+  /** A container's Materialize fade multiplier; 1 outside a transition. */
+  internal var transitionAlpha: Float = 1f
+    set(value) {
+      if (field != value) {
+        field = value
+        markDirty(GlassDirtyFields.Alpha)
+      }
+    }
+
   internal var systemAppearance: GlassSystemAppearance = GlassSystemAppearance.Light
     set(value) {
       if (field != value) {
         field = value
+        markDirty(GlassDirtyFields.Accessibility)
         updateInheritedStyleValues()
       }
     }
@@ -211,6 +221,8 @@ internal abstract class GlassRuntimeState {
         HazeLogger.d(TAG) { "LocalGlassStyle changed. Current: $field. New: $value" }
         field = value
       }
+      // Always re-resolve: this re-runs Style blocks inside the node's observed update, which is
+      // how state read by an unchanged Style reaches the node.
       updateInheritedStyleValues()
     }
 
@@ -226,7 +238,37 @@ internal abstract class GlassRuntimeState {
   private var inheritedStyleValues: GlassStyleValues =
     resolveGlassStyleValues(compositionLocalStyle, style, systemAppearance)
 
+  private var styleBatchDepth = 0
+  private var styleResolutionPending = false
+
+  /** Resolves Styles once when [block] ends, however many of their inputs it changes. */
+  internal inline fun batchStyleResolution(block: () -> Unit) {
+    beginStyleBatch()
+    try {
+      block()
+    } finally {
+      endStyleBatch()
+    }
+  }
+
+  @PublishedApi
+  internal fun beginStyleBatch() {
+    styleBatchDepth++
+  }
+
+  @PublishedApi
+  internal fun endStyleBatch() {
+    if (--styleBatchDepth == 0 && styleResolutionPending) {
+      styleResolutionPending = false
+      updateInheritedStyleValues()
+    }
+  }
+
   private fun updateInheritedStyleValues() {
+    if (styleBatchDepth > 0) {
+      styleResolutionPending = true
+      return
+    }
     val resolved = resolveGlassStyleValues(compositionLocalStyle, style, systemAppearance)
     val previous = inheritedStyleValues
     inheritedStyleValues = resolved

@@ -137,8 +137,8 @@ fun KotlinMultiplatformExtension.addDefaultHazeTargets(
     }
     sourceSets.getByName("jvmMain").dependsOn(skiaMain)
     if (withWeb) {
-      sourceSets.getByName("wasmJsMain").dependsOn(skikoMain)
-      sourceSets.getByName("jsMain").dependsOn(skikoMain)
+      // webMain, the parent of wasmJsMain and jsMain, has the web's side of what skikoMain expects.
+      sourceSets.getByName("webMain").dependsOn(skikoMain)
     }
   }
 }

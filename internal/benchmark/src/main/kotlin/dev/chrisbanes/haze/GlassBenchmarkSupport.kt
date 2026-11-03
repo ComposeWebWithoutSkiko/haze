@@ -13,14 +13,15 @@ import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assume.assumeFalse
 import org.junit.Assume.assumeTrue
 
-internal const val GLASS_TARGET_PACKAGE = "dev.chrisbanes.haze.sample.android"
-internal const val GLASS_BENCHMARK_ITERATIONS = 8
+internal const val TARGET_PACKAGE = "dev.chrisbanes.haze.sample.android"
+internal const val BENCHMARK_ITERATIONS = 8
 internal const val GLASS_RUNTIME_DRAW_SECTION = "HazeGlass.runtimeDraw"
 internal const val GLASS_CREATE_RENDER_EFFECT_SECTION = "HazeGlass.createRenderEffect"
 internal const val GLASS_PREPARE_EFFECTS_SECTION = "HazeGlass.prepareEffects"
 internal const val GLASS_PREPARE_LAYERS_SECTION = "HazeGlass.prepareLayers"
 internal const val HAZE_BACKDROP_DRAW_SECTION = "HazeBackdrop.draw"
 internal const val HAZE_SOURCE_RECORD_SECTION = "HazeSource.record"
+internal const val HWUI_GRAPHICS_LAYER_DRAW_SECTION = "drawLayer [graphicsLayer]%"
 
 internal fun requireGlassBenchmarkDevice() {
   assumeTrue(
@@ -43,7 +44,7 @@ internal fun requireBackdropBenchmarkDevice() {
   )
 }
 
-private fun isBackdropSdkSupported(): Boolean {
+internal fun isBackdropSdkSupported(): Boolean {
   val fullSdkInt = if (Build.VERSION.SDK_INT < 36) {
     Build.VERSION.SDK_INT * 100_000
   } else {
@@ -61,8 +62,20 @@ internal fun backdropComparisonMetrics(
   requireBackdropDraw: Boolean,
 ): List<Metric> = listOf<Metric>(
   FrameTimingMetric(),
-  MemoryUsageMetric(MemoryUsageMetric.Mode.Max),
+  glassMemoryMetric(),
 ) + backdropTraceMetrics(requireBackdropDraw)
+
+// The heap counter appears only after a GC, and AndroidX drops every single-value metric for an
+// iteration that lacks one of them, so only the counters present in every trace are requested.
+@OptIn(ExperimentalMetricApi::class)
+private fun glassMemoryMetric() = MemoryUsageMetric(
+  mode = MemoryUsageMetric.Mode.Max,
+  subMetrics = listOf(
+    MemoryUsageMetric.SubMetric.Gpu,
+    MemoryUsageMetric.SubMetric.RssAnon,
+    MemoryUsageMetric.SubMetric.RssFile,
+  ),
+)
 
 @OptIn(ExperimentalMetricApi::class)
 private fun backdropTraceMetrics(
@@ -87,7 +100,12 @@ internal fun glassMetrics(
   includePreparationMetrics: Boolean = false,
   includeBackdropComparisonMetrics: Boolean = false,
   requireBackdropDraw: Boolean = false,
+  includeRedrawMetrics: Boolean = false,
 ): List<Metric> = buildList {
+  // Both metrics would otherwise add a hazeSourceRecord measurement, which AndroidX rejects.
+  require(!(includeRedrawMetrics && includeBackdropComparisonMetrics)) {
+    "includeRedrawMetrics already records HazeSource.record; do not combine it with backdrop comparison metrics"
+  }
   add(FrameTimingMetric())
   if (requireRuntimeMarker) {
     add(
@@ -99,7 +117,23 @@ internal fun glassMetrics(
     )
   }
   if (includeMemory) {
-    add(MemoryUsageMetric(MemoryUsageMetric.Mode.Max))
+    add(glassMemoryMetric())
+  }
+  if (includeRedrawMetrics) {
+    add(
+      TraceSectionMetric(
+        sectionName = HWUI_GRAPHICS_LAYER_DRAW_SECTION,
+        mode = TraceSectionMetric.Mode.Count,
+        label = "graphicsLayerDraw",
+      ),
+    )
+    add(
+      TraceSectionMetric(
+        sectionName = HAZE_SOURCE_RECORD_SECTION,
+        mode = TraceSectionMetric.Mode.Count,
+        label = "hazeSourceRecord",
+      ),
+    )
   }
   if (includeBackdropComparisonMetrics) {
     addAll(backdropTraceMetrics(requireBackdropDraw))
@@ -139,7 +173,7 @@ private fun isProbablyEmulator(): Boolean =
     Build.HARDWARE.contains("ranchu", ignoreCase = true) ||
     Build.PRODUCT.contains("sdk", ignoreCase = true)
 
-private fun isBenchmarkDryRun(): Boolean =
+internal fun isBenchmarkDryRun(): Boolean =
   InstrumentationRegistry.getArguments()
     .getString("androidx.benchmark.dryRunMode.enable")
     .toBoolean()

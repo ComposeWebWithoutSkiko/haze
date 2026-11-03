@@ -11,8 +11,12 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.LinearGradient
+import androidx.compose.ui.graphics.RadialGradient
 import androidx.compose.ui.graphics.Shader
 import androidx.compose.ui.graphics.ShaderBrush
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.SweepGradient
 import androidx.compose.ui.graphics.isSpecified
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.unit.Density
@@ -46,7 +50,7 @@ internal fun createRenderEffect(
   val offset = (params.contentOffset * params.scale).round()
 
   val blurRadiusPx = params.resolveBlurRadiusPx(density)
-  val progressiveShader = params.progressive?.asBrush()?.toShader(size)
+  val progressiveShader = params.progressive?.asBrush()?.toShader(params.contentSize, params.scale)
 
   val input: PlatformRenderEffect? = if (
     params.backgroundColor.isSpecified && params.backgroundColor.alpha > 0f
@@ -105,6 +109,9 @@ internal fun createRenderEffect(
           scale = params.scale,
         ),
         blendMode = BlendMode.Softlight,
+        // Only the mask lives in content coordinates. Unmasked noise stays in layer coordinates;
+        // offsetting it would shift it off the expanded layer.
+        offset = if (progressiveShader != null) offset else Offset.Zero,
       )
     } else {
       blur
@@ -112,27 +119,34 @@ internal fun createRenderEffect(
 
     blurWithNoise.withTints(
       params.colorEffects,
-      size,
+      params.contentSize,
+      params.scale,
       offset,
       params.colorEffectsAlphaModulate,
       progressiveShader,
     )
   }
 
-  val masked = styled.withMask(params.mask, size, offset)
-  val result = if (params.retainInputWhenMasked && params.mask != null) {
-    createOffsetRenderEffect(0f, 0f).blendForeground(masked, BlendMode.SrcOver)
-  } else {
-    masked
-  }
+  val progressiveMasked = styled
+    .withMask(params.progressiveMask, params.contentSize, params.scale, offset)
+    .let { masked ->
+      if (params.retainInputWhenMasked && params.progressiveMask != null) {
+        createOffsetRenderEffect(0f, 0f).blendForeground(masked, BlendMode.SrcOver)
+      } else {
+        masked
+      }
+    }
 
-  return result
+  // The user's mask fades the complete output, including any retained input.
+  return progressiveMasked.withMask(params.mask, params.contentSize, params.scale, offset)
 }
 
 internal fun Float.hasVisibleNoise(): Boolean = this > 0f
 
-private fun RenderEffectParams.combinedNoiseTintColor(): Color? {
-  if (!noiseFactor.hasVisibleNoise() || progressive != null || mask != null) return null
+internal fun RenderEffectParams.combinedNoiseTintColor(): Color? {
+  if (!noiseFactor.hasVisibleNoise() || progressive != null || mask != null || progressiveMask != null) {
+    return null
+  }
   val tint = colorEffects.singleOrNull() as? TintColorHazeColorEffect ?: return null
   if (tint.blendMode != BlendMode.SrcOver) return null
 
@@ -163,24 +177,26 @@ internal expect fun createNoiseEffect(
 private fun PlatformRenderEffect.withTints(
   effects: List<HazeColorEffect>,
   size: Size,
+  scale: Float,
   offset: Offset,
   alphaModulate: Float = 1f,
   mask: Shader? = null,
 ): PlatformRenderEffect = effects.fastFold(this) { acc, effect ->
-  acc.withColorEffect(effect, size, offset, alphaModulate, mask)
+  acc.withColorEffect(effect, size, scale, offset, alphaModulate, mask)
 }
 
 private fun PlatformRenderEffect.withColorEffect(
   effect: HazeColorEffect,
   size: Size,
+  scale: Float,
   offset: Offset,
   alphaModulate: Float = 1f,
   mask: Shader? = null,
 ): PlatformRenderEffect {
   return when (effect) {
-    is TintBrushHazeColorEffect -> withBrushTint(effect, size, offset, alphaModulate, mask)
+    is TintBrushHazeColorEffect -> withBrushTint(effect, size, scale, offset, alphaModulate, mask)
     is TintColorHazeColorEffect -> withColorTint(effect, offset, alphaModulate, mask)
-    is ColorFilterHazeColorEffect -> withColorFilter(effect, size, offset, mask)
+    is ColorFilterHazeColorEffect -> withColorFilter(effect, offset, mask)
   }
 }
 
@@ -207,11 +223,16 @@ internal fun PlatformRenderEffect.withAlpha(alpha: Float): PlatformRenderEffect 
 private fun PlatformRenderEffect.withBrushTint(
   effect: TintBrushHazeColorEffect,
   size: Size,
+  scale: Float,
   offset: Offset,
   alphaModulate: Float,
   mask: Shader?,
 ): PlatformRenderEffect {
-  val tintBrush = effect.brush.toShader(size) ?: return this
+  val brush = effect.brush
+  if (brush is SolidColor) {
+    return withColorTint(TintColorHazeColorEffect(brush.value, effect.blendMode), offset, alphaModulate, mask)
+  }
+  val tintBrush = brush.toShader(size, scale) ?: return this
 
   val brushEffect = createShaderRenderEffect(tintBrush).withAlpha(alphaModulate)
 
@@ -234,31 +255,26 @@ private fun PlatformRenderEffect.withColorTint(
   alphaModulate: Float,
   mask: Shader?,
 ): PlatformRenderEffect {
+  if (effect.blendMode == BlendMode.Dst) return this
   val tintColor = effect.resolveColor(alphaModulate) ?: return this
 
-  val colorEffect = createBlendColorFilter(tintColor.toArgb(), effect.blendMode)
-
-  val effectWithMask = if (mask != null) {
-    createColorFilterRenderEffect(
-      colorFilter = createBlendColorFilter(tintColor.toArgb(), BlendMode.SrcIn),
+  val tintArgb = tintColor.toArgb()
+  if (mask != null) {
+    val maskedTint = createColorFilterRenderEffect(
+      colorFilter = createBlendColorFilter(tintArgb, BlendMode.SrcIn),
       input = createShaderRenderEffect(mask),
     )
-  } else {
-    createColorFilterRenderEffect(
-      colorFilter = colorEffect,
-      input = this,
-    )
-  }
-
-  return if (mask != null) {
-    blendForeground(
-      foreground = effectWithMask,
+    return blendForeground(
+      foreground = maskedTint,
       blendMode = effect.blendMode,
       offset = offset,
     )
-  } else {
-    effectWithMask
   }
+  if (effect.blendMode == BlendMode.DstIn && (tintArgb ushr 24) == 255) return this
+  return createColorFilterRenderEffect(
+    colorFilter = createBlendColorFilter(tintArgb, effect.blendMode),
+    input = this,
+  )
 }
 
 private fun TintColorHazeColorEffect.resolveColor(alphaModulate: Float): Color? {
@@ -276,7 +292,6 @@ private fun TintColorHazeColorEffect.resolveColor(alphaModulate: Float): Color? 
  */
 private fun PlatformRenderEffect.withColorFilter(
   effect: ColorFilterHazeColorEffect,
-  size: Size,
   offset: Offset,
   mask: Shader?,
 ): PlatformRenderEffect {
@@ -285,11 +300,23 @@ private fun PlatformRenderEffect.withColorFilter(
     input = this,
   )
 
-  return applyMaskAndBlend(
-    baseEffect = filterEffect,
+  // Filtered input already uses expanded-layer coordinates. Only the independently
+  // authored mask needs to move from node-local coordinates into that layer.
+  val maskedFilter = if (mask != null) {
+    createBlendRenderEffect(
+      blendMode = BlendMode.SrcIn,
+      background = createShaderRenderEffect(mask).let {
+        createOffsetRenderEffect(offset.x, offset.y, it)
+      },
+      foreground = filterEffect,
+    )
+  } else {
+    filterEffect
+  }
+
+  return blendForeground(
+    foreground = maskedFilter,
     blendMode = effect.blendMode,
-    mask = mask,
-    offset = offset,
   )
 }
 
@@ -322,10 +349,11 @@ private fun PlatformRenderEffect.applyMaskAndBlend(
 private fun PlatformRenderEffect.withMask(
   brush: Brush?,
   size: Size,
+  scale: Float,
   offset: Offset,
   blendMode: BlendMode = BlendMode.DstIn,
 ): PlatformRenderEffect {
-  val shader = brush?.toShader(size) ?: return this
+  val shader = brush?.toShader(size, scale) ?: return this
   return blendForeground(
     foreground = createShaderRenderEffect(shader),
     blendMode = blendMode,
@@ -333,7 +361,16 @@ private fun PlatformRenderEffect.withMask(
   )
 }
 
-private fun Brush.toShader(size: Size): Shader? = when (this) {
-  is ShaderBrush -> createShader(size)
+private fun Brush.toShader(size: Size, scale: Float = 1f): Shader? = when {
+  this is ShaderBrush -> createScaledShader(size, scale)
+  this is SolidColor -> Brush.linearGradient(listOf(value, value)).toShader(size, scale)
   else -> null
 }
+
+internal fun Brush.isCustomShaderBrush(): Boolean = this is ShaderBrush &&
+  this !is LinearGradient && this !is RadialGradient && this !is SweepGradient
+
+/** Resolves brush geometry in content coordinates before scaling the generated shader. */
+internal expect fun ShaderBrush.createScaledShader(size: Size, scale: Float): Shader
+
+internal expect fun BlurVisualEffect.constrainInputScaleForBrushes(scale: Float): Float

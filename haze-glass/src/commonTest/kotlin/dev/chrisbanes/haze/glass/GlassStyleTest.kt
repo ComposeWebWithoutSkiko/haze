@@ -36,6 +36,100 @@ import kotlin.test.Test
 class GlassStyleTest {
 
   @Test
+  fun opticsTransform_usesInheritedValuesAndReplaysWithoutAccumulating() {
+    val custom = GlassOptics.clear.copy(refractionStrength = 0.4f)
+    val local = GlassStyle { optics(custom) }
+    val adjustment = GlassStyle { optics { copy(refractionStrength = refractionStrength + 0.1f) } }
+    repeat(2) {
+      assertThat(resolveGlassStyleValues(local, adjustment).optics)
+        .isEqualTo(custom.copy(refractionStrength = 0.5f))
+    }
+    assertThat(resolveGlassStyleValues(GlassStyle, adjustment).optics)
+      .isEqualTo(GlassOptics.regular.copy(refractionStrength = 0.8f))
+  }
+
+  @Test
+  fun opticsTransform_respectsOrderedReplacementAndBuiltInStyles() {
+    val adjustment = GlassStyle { optics { copy(blurRadius = OpticalSizeValue.Fixed(4.dp)) } }
+    for ((style, optics) in listOf(GlassStyle.regular to GlassOptics.regular, GlassStyle.clear to GlassOptics.clear)) {
+      assertThat(resolveGlassStyleValues(GlassStyle, style.then(adjustment)).optics)
+        .isEqualTo(optics.copy(blurRadius = OpticalSizeValue.Fixed(4.dp)))
+      assertThat(resolveGlassStyleValues(GlassStyle, adjustment.then(style)).optics)
+        .isSameInstanceAs(optics)
+    }
+    val replacement = GlassOptics(depth = OpticalSizeValue.Fixed(0.2f))
+    assertThat(resolveGlassStyleValues(GlassStyle, adjustment.then { optics(replacement) }).optics)
+      .isSameInstanceAs(replacement)
+  }
+
+  @Test
+  fun opticsTransform_validatesWhenEvaluated() {
+    val style = GlassStyle { optics { copy(refractionStrength = -1f) } }
+    assertFailure { resolveGlassStyleValues(GlassStyle, style) }
+      .isInstanceOf<IllegalArgumentException>()
+  }
+
+  @Test
+  fun glassOpticsConstructor_keepsDefaults() {
+    val custom = GlassOptics()
+    assertThat(custom.blurRadius).isEqualTo(OpticalSizeValue.Fixed(14.dp))
+    assertThat(custom.refractionProfile).isEqualTo(RefractionProfile.Surface)
+    assertThat(custom.refractionDisplacement).isEqualTo(15.dp)
+    assertThat(custom.refractionDetailIntensity).isEqualTo(0.76f)
+  }
+
+  @Test
+  fun copy_replacesOnlyGivenValues() {
+    // Distinct values in every field, so a swapped copy parameter changes the result.
+    val optics = GlassOptics(
+      refractionStrength = 0.11f,
+      refractionHeightFraction = 0.22f,
+      refractionDisplacement = 33.dp,
+      depth = OpticalSizeValue.Fixed(0.44f),
+      blurRadius = OpticalSizeValue.Fixed(5.dp),
+      progressive = HazeProgressive.verticalGradient(),
+      refractionFoldStrength = 0.66f,
+      refractionDetailIntensity = 0.77f,
+      refractionProfile = RefractionProfile.Edge(8.dp),
+    )
+    assertThat(optics.copy()).isEqualTo(optics)
+    assertThat(optics.copy(refractionStrength = 0.2f)).isEqualTo(
+      GlassOptics(
+        refractionStrength = 0.2f,
+        refractionHeightFraction = 0.22f,
+        refractionDisplacement = 33.dp,
+        depth = OpticalSizeValue.Fixed(0.44f),
+        blurRadius = OpticalSizeValue.Fixed(5.dp),
+        progressive = HazeProgressive.verticalGradient(),
+        refractionFoldStrength = 0.66f,
+        refractionDetailIntensity = 0.77f,
+        refractionProfile = RefractionProfile.Edge(8.dp),
+      ),
+    )
+
+    val settings = GlassAccessibilitySettings(reduceTransparency = true, reducedTransparencyFallbackColor = Color.Blue)
+    assertThat(settings.copy()).isEqualTo(settings)
+    assertThat(settings.copy(increaseContrast = true)).isEqualTo(
+      GlassAccessibilitySettings(reduceTransparency = true, increaseContrast = true, reducedTransparencyFallbackColor = Color.Blue),
+    )
+    assertThat(settings.copy(showBorders = true)).isEqualTo(
+      GlassAccessibilitySettings(reduceTransparency = true, showBorders = true, reducedTransparencyFallbackColor = Color.Blue),
+    )
+  }
+
+  @Test
+  fun copy_preservesAndClearsNullableValues() {
+    val progressive = HazeProgressive.verticalGradient()
+    val optics = GlassOptics(progressive = progressive)
+    assertThat(optics.copy(refractionStrength = 0.2f).progressive).isEqualTo(progressive)
+    assertThat(optics.copy(progressive = null).progressive).isNull()
+
+    val settings = GlassAccessibilitySettings(reducedTransparencyFallbackColor = Color.Blue)
+    assertThat(settings.copy(showBorders = true).reducedTransparencyFallbackColor).isEqualTo(Color.Blue)
+    assertThat(settings.copy(reducedTransparencyFallbackColor = null).reducedTransparencyFallbackColor).isNull()
+  }
+
+  @Test
   fun lightPosition_defaultsToCenter() {
     assertThat(resolveGlassStyleValues(GlassStyle, GlassStyle).lightPosition)
       .isEqualTo(Alignment.Center)
@@ -63,84 +157,20 @@ class GlassStyleTest {
   }
 
   @Test
-  fun directOptics_constructsTheCompleteFixedValue() {
-    val progressive = HazeProgressive.verticalGradient()
-    val style = GlassStyle {
-      optics(
-        refractionStrength = 0.8f,
-        refractionHeightFraction = 0.4f,
-        refractionDisplacement = 24.dp,
-        depth = 0.6f,
-        blurRadius = 20.dp,
-        progressive = progressive,
-        refractionFoldStrength = 0.65f,
-        refractionProfile = RefractionProfile.Edge(28.dp),
-      )
-    }
-
-    assertThat(resolveGlassStyleValues(GlassStyle, style).optics).isEqualTo(
-      GlassOptics(
-        refractionStrength = 0.8f,
-        refractionHeightFraction = 0.4f,
-        refractionDisplacement = 24.dp,
-        depth = OpticalSizeValue.Fixed(0.6f),
-        blurRadius = OpticalSizeValue.Fixed(20.dp),
-        progressive = progressive,
-        refractionFoldStrength = 0.65f,
-        refractionProfile = RefractionProfile.Edge(28.dp),
-      ),
-    )
-  }
-
-  @Test
-  fun directOptics_usesFixedValidation() {
-    assertFixedAndDirectOpticsFailure(
-      "refractionStrength must be finite and in 0f..1f",
-      fixed = { GlassOptics(refractionStrength = Float.NaN) },
-      direct = { optics(refractionStrength = Float.NaN) },
-    )
-    assertFixedAndDirectOpticsFailure(
-      "refractionFoldStrength must be finite and in 0f..1f",
-      fixed = { GlassOptics(refractionFoldStrength = Float.NaN) },
-      direct = { optics(refractionFoldStrength = Float.NaN) },
-    )
-    assertFixedAndDirectOpticsFailure(
-      "refractionHeightFraction must be finite and in 0f..1f",
-      fixed = { GlassOptics(refractionHeightFraction = 1.1f) },
-      direct = { optics(refractionHeightFraction = 1.1f) },
-    )
-    assertFixedAndDirectOpticsFailure(
-      "refractionDisplacement must be specified, finite, and non-negative",
-      fixed = { GlassOptics(refractionDisplacement = Dp.Unspecified) },
-      direct = { optics(refractionDisplacement = Dp.Unspecified) },
-    )
-    assertFixedAndDirectOpticsFailure(
-      "depth must be finite and in 0f..1f",
-      fixed = { GlassOptics(depth = OpticalSizeValue.Fixed(Float.NEGATIVE_INFINITY)) },
-      direct = { optics(depth = Float.NEGATIVE_INFINITY) },
-    )
-    assertFixedAndDirectOpticsFailure(
-      "blurRadius must be specified, finite, and non-negative",
-      fixed = { GlassOptics(blurRadius = OpticalSizeValue.Fixed((-1).dp)) },
-      direct = { optics(blurRadius = (-1).dp) },
-    )
-  }
-
-  @Test
   fun completeOptics_preservesResponsiveAndProgrammaticValues() {
     val sharedOptics = GlassOptics(depth = OpticalSizeValue.Fixed(0.4f))
-    val programmaticallySelected: GlassOptics = listOf(GlassDefaults.optics, sharedOptics).last()
+    val programmaticallySelected: GlassOptics = listOf(GlassOptics.regular, sharedOptics).last()
 
     val responsive = resolveGlassStyleValues(
       GlassStyle,
-      GlassStyle { optics(GlassDefaults.optics) },
+      GlassStyle { optics(GlassOptics.regular) },
     )
     val selected = resolveGlassStyleValues(
       GlassStyle,
       GlassStyle { optics(programmaticallySelected) },
     )
 
-    assertThat(responsive.optics).isSameInstanceAs(GlassDefaults.optics)
+    assertThat(responsive.optics).isSameInstanceAs(GlassOptics.regular)
     assertThat(selected.optics).isSameInstanceAs(sharedOptics)
   }
 
@@ -169,7 +199,7 @@ class GlassStyleTest {
     assertThat(defaults.interactionLightRadiusFraction)
       .isEqualTo(GlassDefaults.interactionLightRadiusFraction)
     assertThat(defaults.interactionPositionAnimationSpec)
-      .isEqualTo(GlassDefaults.positionAnimationSpec)
+      .isEqualTo(GlassDefaults.interactionPositionAnimationSpec)
     assertThat(resolved.hoveredInteraction?.lightingIntensity?.value).isEqualTo(0.4f)
     assertThat(resolved.focusedInteraction?.lightingIntensity?.value).isEqualTo(0.5f)
     assertThat(resolved.pressedInteraction?.lightingIntensity?.value).isEqualTo(0.3f)
@@ -178,14 +208,11 @@ class GlassStyleTest {
   }
 
   @Test
-  fun interactionLightRadiusFraction_rejectsInvalidValues() {
+  fun interactionLightRadiusFraction_rejectsInvalidValuesWhenEvaluated() {
     listOf(Float.NaN, Float.NEGATIVE_INFINITY, -0.1f, 2.1f, Float.POSITIVE_INFINITY)
       .forEach { invalid ->
-        assertFailure {
-          GlassStyle { interactionLightRadiusFraction(invalid) }
-        }.apply {
-          isInstanceOf<IllegalArgumentException>()
-          hasMessage("interactionLightRadiusFraction must be finite and in 0f..2f")
+        assertEvaluationFailure("interactionLightRadiusFraction must be finite and in 0f..2f") {
+          interactionLightRadiusFraction(invalid)
         }
       }
   }
@@ -206,7 +233,7 @@ class GlassStyleTest {
   }
 
   @Test
-  fun interactionResponses_rejectInvalidValuesAtConstruction() {
+  fun interactionResponses_rejectInvalidValuesWhenEvaluated() {
     assertInvalidFloatWrites(
       invalidUnitInterval("lightingIntensity") { hovered { lightingIntensity(it) } },
       invalidDoubleInterval("refractionMultiplier") { hovered { refractionMultiplier(it) } },
@@ -261,7 +288,7 @@ class GlassStyleTest {
   }
 
   @Test
-  fun construction_recordsWritesOnceAndResolutionCreatesFreshValues() {
+  fun resolution_runsBlocksEachTimeIntoFreshValues() {
     var styleExecutions = 0
     var interactionExecutions = 0
     val style = GlassStyle {
@@ -273,15 +300,16 @@ class GlassStyleTest {
       }
     }
 
-    assertThat(styleExecutions).isEqualTo(1)
-    assertThat(interactionExecutions).isEqualTo(1)
+    assertThat(styleExecutions).isEqualTo(0)
+    assertThat(interactionExecutions).isEqualTo(0)
 
     val first = resolveGlassStyleValues(GlassStyle, style)
     val second = resolveGlassStyleValues(GlassStyle, style)
 
-    assertThat(styleExecutions).isEqualTo(1)
-    assertThat(interactionExecutions).isEqualTo(1)
+    assertThat(styleExecutions).isEqualTo(2)
+    assertThat(interactionExecutions).isEqualTo(2)
     assertThat(first).isNotSameInstanceAs(second)
+    assertThat(second).isEqualTo(first)
     assertThat(first.alpha).isEqualTo(0.4f)
     assertThat(second.alpha).isEqualTo(0.4f)
     assertThat(first.pressedInteraction?.lightingIntensity?.value).isEqualTo(0.6f)
@@ -289,13 +317,26 @@ class GlassStyleTest {
   }
 
   @Test
-  fun then_composesRecordedStylesWithoutRerunningBuilders() {
+  fun combinedGlassStyle_equalElementsCompareEqual() {
+    val shared = GlassStyle { alpha(0.5f) }
+
+    val first = GlassStyle.regular.then(shared)
+    val second = GlassStyle.regular.then(shared)
+
+    assertThat(first).isEqualTo(second)
+    assertThat(first.hashCode()).isEqualTo(second.hashCode())
+    assertThat(first).isNotEqualTo(GlassStyle.regular.then(GlassStyle { alpha(0.5f) }))
+    assertThat(first).isNotEqualTo(GlassStyle.clear.then(shared))
+  }
+
+  @Test
+  fun then_composesStylesAndRunsEachBlockOncePerResolution() {
     var baseExecutions = 0
     var overrideExecutions = 0
     var appendedExecutions = 0
     val base = GlassStyle {
       baseExecutions++
-      optics(depth = 0.2f)
+      optics(GlassOptics(depth = OpticalSizeValue.Fixed(0.2f)))
       pressed {
         lightingIntensity(0.2f)
         refractionMultiplier(1.2f)
@@ -303,7 +344,7 @@ class GlassStyleTest {
     }
     val override = GlassStyle {
       overrideExecutions++
-      optics(depth = 0.6f)
+      optics(GlassOptics(depth = OpticalSizeValue.Fixed(0.6f)))
       pressed { lightingIntensity(0.7f) }
     }
     val combined = base.then(override).then {
@@ -311,12 +352,14 @@ class GlassStyleTest {
       alpha(0.5f)
     }
 
+    assertThat(baseExecutions).isEqualTo(0)
+
     val first = resolveGlassStyleValues(GlassStyle, combined)
     val second = resolveGlassStyleValues(GlassStyle, combined)
 
-    assertThat(baseExecutions).isEqualTo(1)
-    assertThat(overrideExecutions).isEqualTo(1)
-    assertThat(appendedExecutions).isEqualTo(1)
+    assertThat(baseExecutions).isEqualTo(2)
+    assertThat(overrideExecutions).isEqualTo(2)
+    assertThat(appendedExecutions).isEqualTo(2)
     assertThat(first.optics).isEqualTo(GlassOptics(depth = OpticalSizeValue.Fixed(0.6f)))
     assertThat(first.pressedInteraction?.lightingIntensity?.value).isEqualTo(0.7f)
     assertThat(first.pressedInteraction?.refractionMultiplier).isNull()
@@ -407,12 +450,11 @@ class GlassStyleTest {
   }
 
   @Test
-  fun staticPropertyWrites_rejectInvalidValuesAtConstruction() {
+  fun staticPropertyWrites_rejectInvalidValuesWhenEvaluated() {
     assertInvalidFloatWrites(
       invalidUnitInterval("specularIntensity") { specularIntensity(it) },
       invalidUnitInterval("ambientResponse") { ambientResponse(it) },
       invalidUnitInterval("chromaticAberrationStrength") { chromaticAberrationStrength(it) },
-      invalidUnitInterval("alpha") { alpha(it) },
       invalidUnitInterval("contentNormalBlend") { contentNormalBlend(it) },
       invalidSignedUnitInterval("contrast") { contrast(it) },
       invalidSignedUnitInterval("whitePoint") { whitePoint(it) },
@@ -420,6 +462,23 @@ class GlassStyleTest {
       invalidNonNegative("specularExponent") { specularExponent(it) },
       invalidNonNegative("fresnelExponent") { fresnelExponent(it) },
     )
+  }
+
+  @Test
+  fun alpha_rejectsNonFiniteWhenEvaluated() {
+    listOf(Float.NaN, Float.NEGATIVE_INFINITY, Float.POSITIVE_INFINITY).forEach { invalid ->
+      assertEvaluationFailure("alpha must be finite") { alpha(invalid) }
+    }
+  }
+
+  @Test
+  fun alphaAndTintAlpha_overshootIsClampedNotThrown() {
+    fun resolve(block: GlassStyleScope.() -> Unit) = resolveGlassStyleValues(GlassStyle, GlassStyle(block))
+
+    assertThat(resolve { alpha(-0.2f) }.alpha).isEqualTo(0f)
+    assertThat(resolve { alpha(1.3f) }.alpha).isEqualTo(1f)
+    assertThat(resolve { tint(Color.Red.copy(alpha = -0.2f)) }.tint.alpha).isEqualTo(0f)
+    assertThat(resolve { tint(Color.Red.copy(alpha = 1.4f)) }.tint.alpha).isEqualTo(1f)
   }
 
   @Test
@@ -480,30 +539,23 @@ class GlassStyleTest {
   }
 
   @Test
-  fun edgeSoftness_rejectsInvalidValuesAtConstruction() {
+  fun edgeSoftness_rejectsInvalidValuesWhenEvaluated() {
     listOf(Dp.Unspecified, Float.NaN.dp, Float.NEGATIVE_INFINITY.dp, (-1).dp, Float.POSITIVE_INFINITY.dp)
       .forEach { invalid ->
-        assertFailure { GlassStyle { edgeSoftness(invalid) } }.apply {
-          isInstanceOf<IllegalArgumentException>()
-          hasMessage("edgeSoftness must be specified, finite, and non-negative")
+        assertEvaluationFailure("edgeSoftness must be specified, finite, and non-negative") {
+          edgeSoftness(invalid)
         }
       }
   }
 
   @Test
-  fun tint_rejectsUnspecifiedAtConstruction() {
-    assertFailure { GlassStyle { tint(Color.Unspecified) } }.apply {
-      isInstanceOf<IllegalArgumentException>()
-      hasMessage("tint must be specified")
-    }
+  fun tint_rejectsUnspecifiedWhenEvaluated() {
+    assertEvaluationFailure("tint must be specified") { tint(Color.Unspecified) }
   }
 
   @Test
-  fun backgroundColor_rejectsUnspecifiedAtConstruction() {
-    assertFailure { GlassStyle { backgroundColor(Color.Unspecified) } }.apply {
-      isInstanceOf<IllegalArgumentException>()
-      hasMessage("backgroundColor must be specified")
-    }
+  fun backgroundColor_rejectsUnspecifiedWhenEvaluated() {
+    assertEvaluationFailure("backgroundColor must be specified") { backgroundColor(Color.Unspecified) }
   }
 
   @Test
@@ -512,10 +564,7 @@ class GlassStyleTest {
 
     assertThat(resolveGlassStyleValues(GlassStyle, GlassStyle { edgeShadow(shadow) }).edgeShadow)
       .isEqualTo(shadow)
-    assertFailure { GlassStyle { edgeShadow(Color.Unspecified) } }.apply {
-      isInstanceOf<IllegalArgumentException>()
-      hasMessage("edgeShadow must be specified")
-    }
+    assertEvaluationFailure("edgeShadow must be specified") { edgeShadow(Color.Unspecified) }
   }
 
   @Test
@@ -546,8 +595,8 @@ class GlassStyleTest {
     val regular = resolveGlassStyleValues(GlassStyle, GlassStyle.regular)
     val clear = resolveGlassStyleValues(GlassStyle, GlassStyle.clear)
 
-    assertThat(regular.optics).isSameInstanceAs(GlassDefaults.optics)
-    assertThat(clear.optics).isSameInstanceAs(GlassStyle.clearOptics)
+    assertThat(regular.optics).isSameInstanceAs(GlassOptics.regular)
+    assertThat(clear.optics).isSameInstanceAs(GlassOptics.clear)
     assertThat(clear.optics).isNotEqualTo(regular.optics)
     assertThat(clear.whitePoint).isNotEqualTo(regular.whitePoint)
     assertThat(clear.chromaMultiplier).isNotEqualTo(regular.chromaMultiplier)
@@ -723,7 +772,7 @@ class GlassStyleTest {
   }
 
   @Test
-  fun lightPosition_rejectsNonFiniteKnownBiasesAtConstruction() {
+  fun lightPosition_rejectsNonFiniteKnownBiasesWhenEvaluated() {
     val cases = listOf<Pair<String, (Float) -> Alignment>>(
       "horizontalBias" to { invalid: Float -> BiasAlignment(invalid, 0f) },
       "verticalBias" to { invalid: Float -> BiasAlignment(0f, invalid) },
@@ -733,9 +782,8 @@ class GlassStyleTest {
 
     cases.forEach { (axis, createAlignment) ->
       listOf(Float.NaN, Float.NEGATIVE_INFINITY, Float.POSITIVE_INFINITY).forEach { invalid ->
-        assertFailure { GlassStyle { lightPosition(createAlignment(invalid)) } }.apply {
-          isInstanceOf<IllegalArgumentException>()
-          hasMessage("lightPosition.$axis must be finite")
+        assertEvaluationFailure("lightPosition.$axis must be finite") {
+          lightPosition(createAlignment(invalid))
         }
       }
     }
@@ -793,25 +841,18 @@ private class InvalidFloatWrite(
   val write: GlassStyleScope.(Float) -> Unit,
 )
 
-private fun assertFixedAndDirectOpticsFailure(
-  message: String,
-  fixed: () -> Unit,
-  direct: GlassStyleScope.() -> Unit,
-) {
-  listOf(fixed, { GlassStyle(direct) }).forEach { invalidWrite ->
-    assertFailure { invalidWrite() }
-      .isInstanceOf<IllegalArgumentException>()
-      .hasMessage(message)
-  }
+/** Asserts that constructing a Style succeeds and resolving it throws [message]. */
+private fun assertEvaluationFailure(message: String, block: GlassStyleScope.() -> Unit) {
+  val style = GlassStyle(block)
+  assertFailure { resolveGlassStyleValues(GlassStyle, style) }
+    .isInstanceOf<IllegalArgumentException>()
+    .hasMessage(message)
 }
 
 private fun assertInvalidFloatWrites(vararg cases: InvalidFloatWrite) {
   cases.forEach { case ->
     case.invalidValues.forEach { invalid ->
-      assertFailure { GlassStyle { case.write(this, invalid) } }.apply {
-        isInstanceOf<IllegalArgumentException>()
-        hasMessage("${case.property} must be ${case.domain}")
-      }
+      assertEvaluationFailure("${case.property} must be ${case.domain}") { case.write(this, invalid) }
     }
   }
 }
@@ -866,9 +907,7 @@ private fun invalidPositiveAtMostOne(
   write,
 )
 
-private class RetainedTrackingGlassDelegate :
-  GlassRuntimeEffect.Delegate,
-  RetainedOutputDelegate {
+private class RetainedTrackingGlassDelegate : GlassRuntimeEffect.Delegate {
 
   var retainedOutputAvailable = false
   var pendingRetainedOutput = false

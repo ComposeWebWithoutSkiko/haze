@@ -2,7 +2,7 @@
 
 ## Scaffold chrome
 
-Place `hazeSource` on the scrolling content and use the same state for each app bar:
+Place [`hazeSource`][hazeSource] on the scrolling content and pass the same state to each bar's effect:
 
 ```kotlin
 val hazeState = rememberHazeState()
@@ -41,12 +41,63 @@ Scaffold(
 }
 ```
 
-Pass scaffold padding to the scrollable content rather than applying it outside the source. That
-keeps interactive content clear of chrome while preserving source pixels behind translucent bars.
+Pass the scaffold padding to the scrolling content as `contentPadding` rather than padding the
+source. Content then scrolls behind the translucent bars while staying reachable.
+
+## Navigation3 transitions
+
+Capture the complete `NavDisplay` and place translucent navigation in a sibling slot, such as
+`Scaffold.bottomBar`. Keep the source viewport full-size and apply the scaffold's `contentPadding`
+inside each scene's scrolling content:
+
+```kotlin
+val hazeState = rememberHazeState()
+val backStack = remember { mutableStateListOf("home") }
+
+Scaffold(
+  bottomBar = {
+    NavigationBar(
+      containerColor = Color.Transparent,
+      modifier = Modifier.hazeBlur(
+        input = HazeInput.Sources(hazeState),
+        style = HazeMaterials.thin(),
+      ),
+    ) {
+      // Navigation items update backStack.
+    }
+  },
+) { contentPadding ->
+  NavDisplay(
+    backStack = backStack,
+    modifier = Modifier.fillMaxSize().hazeSource(hazeState),
+    onBack = {
+      if (backStack.size > 1) backStack.removeAt(backStack.lastIndex)
+    },
+    entryProvider = { key ->
+      NavEntry(key) {
+        LazyColumn(
+          modifier = Modifier.fillMaxSize(),
+          contentPadding = contentPadding,
+        ) {
+          items(100) { index ->
+            Text("$key: $index", Modifier.padding(16.dp))
+          }
+        }
+      }
+    },
+  )
+}
+```
+
+Keep the effect-backed navigation outside the source subtree. Capturing the complete `NavDisplay`
+lets the effect follow its transition compositing. The same sibling arrangement applies to a
+navigation rail: keep the source viewport full-size behind the rail, rather than measuring the
+source beside it.
 
 ## Sticky headers
 
-Avoid making a `LazyColumn` both a source and a descendant effect. Mark non-header items as sources:
+Don't mark the whole `LazyColumn` as a source when the header inside it applies the effect. Mark
+the non-header items instead:
 
 ```kotlin
 val hazeState = rememberHazeState()
@@ -74,7 +125,8 @@ LazyColumn {
 
 ## Privacy-sensitive source transitions
 
-Clear retained Blur output when no source is available:
+By default, an effect can keep showing its last output after its source disappears. To clear it
+instead, for example when the source showed sensitive content:
 
 ```kotlin
 Modifier.hazeBlur(
@@ -103,4 +155,6 @@ BottomAppBar(
 )
 ```
 
-Both modifiers evaluate the shared Style into independent node-owned runtimes.
+Styles are immutable, so one Style can be shared by several modifiers.
+
+[hazeSource]: api/haze/dev.chrisbanes.haze/haze-source.html

@@ -1,7 +1,8 @@
 # Screenshot-test guidance
 
 Read [the canonical screenshot-test commands and profiles](../screenshot-tests.md) before changing
-library screenshots. The matrix currently covers only the Blur and Glass credit-card scenes. The
+library screenshots. The matrix currently covers the Blur and Glass credit-card scenes and the
+Cupertino scrim-fallback scene (Sources and Balanced only). The
 remaining library regression tests and sample presentation screenshots are still separate suites.
 
 Reuse one of those shared scenes and add applicable catalog cases. Do not copy a test class or put
@@ -31,3 +32,7 @@ SDKs, filtered runs, and record mode are incomplete full validation, not skips. 
 revision, selected coverage, results, and missing device evidence accurately. When adding a case,
 update the independent acceptance set in `scripts/verify_screenshot_matrix.py` alongside the catalog
 and tests so discovery cannot silently omit it.
+
+Robolectric runtime jars are resolved by Gradle and tests run offline. A test on a new Robolectric SDK
+level must also add it to `Versions.ROBOLECTRIC_SDKS` in `gradle/build-logic`, or its test class
+fails with `no artifacts found for DependencyJar`.

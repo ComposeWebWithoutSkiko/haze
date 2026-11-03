@@ -1,7 +1,7 @@
 // Copyright 2026, Christopher Banes and the Haze project contributors
 // SPDX-License-Identifier: Apache-2.0
 
-@file:OptIn(ExperimentalFoundationApi::class, ExperimentalHazeApi::class)
+@file:OptIn(ExperimentalFoundationApi::class)
 
 package dev.chrisbanes.haze.sample
 
@@ -51,7 +51,6 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavHostController
-import dev.chrisbanes.haze.ExperimentalHazeApi
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.glass.GlassStyle
 import dev.chrisbanes.haze.rememberHazeState
@@ -93,6 +92,7 @@ public fun GlassProductSampleContent(
   isDark: Boolean = androidx.compose.foundation.isSystemInDarkTheme(),
 ) {
   val hazeState = rememberHazeState()
+  val glassStyle = remember(isDark) { productGlassStyle(isDark) }
   val pagerState = rememberPagerState(
     initialPage = selectedArtworkIndex,
     pageCount = { GalleryArtworks.size },
@@ -146,7 +146,7 @@ public fun GlassProductSampleContent(
 
     ProductTopBar(
       hazeState = hazeState,
-      style = productGlassStyle(isDark),
+      style = glassStyle,
       selectedArtworkIndex = selectedArtworkIndex,
       recordingMode = recordingMode,
       onBack = onBack,
@@ -156,7 +156,7 @@ public fun GlassProductSampleContent(
     ProductMetadataCard(
       hazeState = hazeState,
       artwork = GalleryArtworks[selectedArtworkIndex],
-      style = productGlassStyle(isDark),
+      style = glassStyle,
       informationExpanded = informationExpanded,
       modifier = Modifier
         .align(if (landscape) Alignment.CenterStart else Alignment.Center)
@@ -165,7 +165,7 @@ public fun GlassProductSampleContent(
     )
     ProductActionDock(
       hazeState = hazeState,
-      style = productGlassStyle(isDark),
+      style = glassStyle,
       favorite = favorite,
       landscape = landscape,
       informationExpanded = informationExpanded,
@@ -211,20 +211,22 @@ private fun ProductTopBar(
     style = style,
     shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp),
     modifier = modifier,
-    interactionStyle = GlassStyle {
-      hovered {
-        animate(DefaultGlassHoverAnimationSpec, DefaultGlassReleaseAnimationSpec) {
-          lightingIntensity(0.35f)
-          refractionMultiplier(1.02f)
-          whitePointDelta(0.01f)
+    interactionStyle = remember {
+      GlassStyle {
+        hovered {
+          animate(DefaultGlassHoverAnimationSpec, DefaultGlassReleaseAnimationSpec) {
+            lightingIntensity(0.35f)
+            refractionMultiplier(1.02f)
+            whitePointDelta(0.01f)
+          }
         }
-      }
-      pressed {
-        animate(DefaultGlassPressAnimationSpec, DefaultGlassReleaseAnimationSpec) {
-          lightingIntensity(1f)
-          refractionMultiplier(1.08f)
-          whitePointDelta(0.04f)
-          scale(0.98f)
+        pressed {
+          animate(DefaultGlassPressAnimationSpec, DefaultGlassReleaseAnimationSpec) {
+            lightingIntensity(1f)
+            refractionMultiplier(1.08f)
+            whitePointDelta(0.04f)
+            scale(0.98f)
+          }
         }
       }
     },
@@ -312,20 +314,22 @@ private fun ProductActionDock(
     style = style,
     shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp),
     modifier = modifier,
-    interactionStyle = GlassStyle {
-      hovered {
-        animate(DefaultGlassHoverAnimationSpec, DefaultGlassReleaseAnimationSpec) {
-          lightingIntensity(0.35f)
-          refractionMultiplier(1.02f)
-          whitePointDelta(0.01f)
+    interactionStyle = remember {
+      GlassStyle {
+        hovered {
+          animate(DefaultGlassHoverAnimationSpec, DefaultGlassReleaseAnimationSpec) {
+            lightingIntensity(0.35f)
+            refractionMultiplier(1.02f)
+            whitePointDelta(0.01f)
+          }
         }
-      }
-      pressed {
-        animate(DefaultGlassPressAnimationSpec, DefaultGlassReleaseAnimationSpec) {
-          lightingIntensity(1f)
-          refractionMultiplier(1.08f)
-          whitePointDelta(0.04f)
-          scale(0.98f)
+        pressed {
+          animate(DefaultGlassPressAnimationSpec, DefaultGlassReleaseAnimationSpec) {
+            lightingIntensity(1f)
+            refractionMultiplier(1.08f)
+            whitePointDelta(0.04f)
+            scale(0.98f)
+          }
         }
       }
     },

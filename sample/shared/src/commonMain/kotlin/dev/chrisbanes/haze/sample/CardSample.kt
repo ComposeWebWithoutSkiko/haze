@@ -6,12 +6,12 @@ package dev.chrisbanes.haze.sample
 import androidx.compose.foundation.layout.Box
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavHostController
-import dev.chrisbanes.haze.ExperimentalHazeApi
 import dev.chrisbanes.haze.HazeInput
 import dev.chrisbanes.haze.blur.HazeBlurStyle
 import dev.chrisbanes.haze.blur.HazeColorEffect
@@ -21,7 +21,6 @@ import dev.chrisbanes.haze.glass.hazeGlass
 import dev.chrisbanes.haze.hazeSource
 
 @Composable
-@OptIn(ExperimentalHazeApi::class)
 fun CreditCardSample(
   navController: NavHostController,
   effect: SampleEffect = SampleEffect.Blur,
@@ -38,10 +37,12 @@ fun CreditCardSample(
                 .clip(shape)
                 .hazeBlur(
                   input = HazeInput.Backdrop(hazeState),
-                  style = HazeBlurStyle {
-                    backgroundColor(Color.Black)
-                    colorEffects(listOf(HazeColorEffect.tint(Color.Yellow.copy(alpha = 0.4f))))
-                    blurRadius(8.dp)
+                  style = remember {
+                    HazeBlurStyle {
+                      backgroundColor(Color.Black)
+                      colorEffects(listOf(HazeColorEffect.tint(Color.Yellow.copy(alpha = 0.4f))))
+                      blurRadius(8.dp)
+                    }
                   },
                 )
 
@@ -49,10 +50,12 @@ fun CreditCardSample(
               Modifier
                 .hazeGlass(
                   input = HazeInput.Backdrop(hazeState),
-                  style = GlassStyle.regular.then {
-                    backgroundColor(glassBackgroundColor)
-                    tint(Color.Yellow.copy(alpha = 0.18f))
-                    shape(shape)
+                  style = remember(glassBackgroundColor, shape) {
+                    GlassStyle.regular.then {
+                      backgroundColor(glassBackgroundColor)
+                      tint(Color.Yellow.copy(alpha = 0.18f))
+                      shape(shape)
+                    }
                   },
                 )
                 .clip(shape)

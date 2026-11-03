@@ -4,10 +4,12 @@
 package dev.chrisbanes.haze.glass
 
 import androidx.compose.animation.core.FiniteAnimationSpec
-import dev.chrisbanes.haze.ExperimentalHazeApi
 
-/** Selects which visual layers receive the interaction scale transform. */
-@ExperimentalHazeApi
+/**
+ * Selects which visual layers receive the interaction scale transform.
+ *
+ * Future minor releases may add entries. Keep an `else` branch when you match exhaustively with `when`.
+ */
 public enum class GlassTransformTarget {
   /** Scales the generated Glass material while leaving the composable content unchanged. */
   MaterialOnly,
@@ -16,8 +18,11 @@ public enum class GlassTransformTarget {
   MaterialAndContent,
 }
 
-/** Selects the pivot used by the interaction scale transform. */
-@ExperimentalHazeApi
+/**
+ * Selects the pivot used by the interaction scale transform.
+ *
+ * Future minor releases may add entries. Keep an `else` branch when you match exhaustively with `when`.
+ */
 public enum class GlassTransformPivot {
   /** Uses the current pointer or interaction position as the transform pivot. */
   Pointer,
@@ -26,16 +31,31 @@ public enum class GlassTransformPivot {
   Center,
 }
 
-/** Controls whether interaction motion is reduced. */
-@ExperimentalHazeApi
+/**
+ * Controls whether Glass motion is reduced.
+ *
+ * `hazeGlass` applies it to interaction responses. [hazeGlassContainer] applies it to member
+ * transitions.
+ *
+ * Future minor releases may add entries. Keep an `else` branch when you match exhaustively with `when`.
+ */
 public enum class GlassReducedMotionPolicy {
-  /** Follows the current platform motion-duration scale. */
+  /**
+   * Follows the current platform motion-duration scale. At a non-zero scale, interaction responses
+   * and container member transitions run under that scale. At zero (animations off), interaction
+   * responses behave as [Reduced] and snap, and container member transitions snap with no
+   * transition, as with [GlassMemberTransition.None].
+   */
   System,
 
-  /** Disables interaction scale motion and snaps animated responses to their targets. */
+  /**
+   * Reduces motion: interaction scale motion is disabled and animated responses snap to their
+   * targets. Container member transitions keep the morph with a critically damped spring at full
+   * duration, with no overshoot, whatever the platform motion-duration scale is.
+   */
   Reduced,
 
-  /** Preserves full interaction motion regardless of the platform motion-duration scale. */
+  /** Preserves full motion regardless of the platform motion-duration scale. */
   Full,
 }
 
@@ -43,9 +63,8 @@ public enum class GlassReducedMotionPolicy {
  * Declares the visual response for one Glass interaction state.
  *
  * This sealed receiver is implemented by Haze and is a declaration DSL, not a consumer
- * implementation point. Each node evaluates recorded declarations into node-owned runtime state.
+ * implementation point. Each node evaluates these declarations into node-owned runtime state.
  */
-@ExperimentalHazeApi
 @GlassStyleDsl
 public sealed interface GlassInteractionScope {
   /** Sets the finite lighting multiplier in the inclusive range `0f..1f`. */

@@ -182,7 +182,8 @@ private class SkikoMutableRuntimeShaderRenderEffect(
     uniforms: RuntimeShaderUniformProvider.() -> Unit,
   ): PlatformRenderEffect {
     uniforms(provider)
-    // ImageFilter snapshots the builder's current uniforms, unlike Android's live RuntimeShader.
+    // ImageFilter snapshots the builder's current uniforms, as Android's RenderEffect copies them
+    // from the shared shader when it is created, so the previous effect keeps its old values.
     return wrapRuntimeShaderConstruction {
       ImageFilter.makeRuntimeShader(builder, shaderNames, inputs)
     }
@@ -196,6 +197,11 @@ private class SkikoMutableRuntimeShaderRenderEffect(
     return updateUniforms(uniforms)
   }
 }
+
+/** Returns a [RuntimeShaderUniformProvider] that sets uniforms and child shaders on this builder. */
+@InternalHazeApi
+public fun RuntimeShaderBuilder.asUniformProvider(): RuntimeShaderUniformProvider =
+  SkikoRuntimeShaderUniformProvider(this)
 
 @JvmInline
 private value class SkikoRuntimeShaderUniformProvider(
@@ -222,6 +228,10 @@ private value class SkikoRuntimeShaderUniformProvider(
 
   override fun setFloatUniform(name: String, value1: Float, value2: Float, value3: Float, value4: Float) {
     builder.uniform(name, value1, value2, value3, value4)
+  }
+
+  override fun setFloatUniform(name: String, values: FloatArray) {
+    builder.uniform(name, values)
   }
 
   override fun setIntUniform(name: String, value: Int) {

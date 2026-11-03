@@ -12,39 +12,22 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import dev.chrisbanes.haze.ExperimentalHazeApi
 
-/** Light-calibrated default values used by `hazeGlass` and [GlassStyle] resolution. */
-@ExperimentalHazeApi
+/**
+ * Light-calibrated default values used by `hazeGlass`, `hazeGlassContainer` and [GlassStyle] resolution.
+ *
+ * These values are calibrated and may change between releases. The `const val`s are inlined into
+ * your code when it compiles, so recompile to pick up a change.
+ */
 @Suppress("ConstPropertyName", "ktlint:standard:property-naming")
 public object GlassDefaults {
   /** Default interaction light radius as a fraction of the material's shortest side. */
   public const val interactionLightRadiusFraction: Float = 0.7f
 
   /** Default animation used for focus and [InteractionSource]-derived positions. */
-  public val positionAnimationSpec: FiniteAnimationSpec<Offset> = spring(
+  public val interactionPositionAnimationSpec: FiniteAnimationSpec<Offset> = spring(
     dampingRatio = 1f,
     stiffness = Spring.StiffnessMedium,
-  )
-
-  /** Default size-aware Haze optical material. */
-  public val optics: GlassOptics = GlassOptics(
-    // Compact controls retain refracted detail; larger surfaces fully diffuse the backdrop.
-    depth = OpticalSizeValue.Responsive(
-      OpticalSizePoint(64.dp, 0.65f),
-      OpticalSizePoint(176.dp, 1f),
-      OpticalSizePoint(220.dp, 1f),
-    ),
-    blurRadius = OpticalSizeValue.Responsive(
-      OpticalSizePoint(64.dp, 20.dp),
-      OpticalSizePoint(176.dp, 24.dp),
-      OpticalSizePoint(220.dp, 25.dp),
-    ),
-    refractionDisplacement = 48.dp,
-    refractionProfile = RefractionProfile.Edge(20.dp),
-    refractionHeightFraction = 0.15f,
-    refractionFoldStrength = 0f,
-    refractionDetailIntensity = 0f,
   )
 
   /** Default intensity of specular highlights, in the range `0f..1f`. */
@@ -76,6 +59,9 @@ public object GlassDefaults {
 
   /** Default quality mode used to render chromatic aberration. */
   public val chromaticAberrationMode: ChromaticAberrationMode = ChromaticAberrationMode.Simple
+
+  /** Default gap below which `hazeGlassContainer` members start to merge. */
+  public val mergeDistance: Dp = 16.dp
 
   /** Default overall opacity, in the range `0f..1f`. */
   public const val alpha: Float = 1f

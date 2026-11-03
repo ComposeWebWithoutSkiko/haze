@@ -39,6 +39,18 @@ class GlassProfilingBenchmark {
   fun stableQuality() = measureBackdropComparisonScenario("stable_quality")
 
   @Test
+  fun resizeQuality() = measureScenario("resize_quality", includeMemory = true)
+
+  @Test
+  fun resizeQuality9() = measureScenario("resize_quality_9", includeMemory = true)
+
+  @Test
+  fun shapeUpdateBalanced() = measureScenario("shape_update_balanced", includeMemory = true)
+
+  @Test
+  fun shapeUpdateBalanced9() = measureScenario("shape_update_balanced_9", includeMemory = true)
+
+  @Test
   fun backdropStableQuality() {
     requireBackdropBenchmarkDevice()
     measureBackdropComparisonScenario("backdrop_stable_quality", requireBackdropDraw = true)
@@ -85,6 +97,12 @@ class GlassProfilingBenchmark {
 
   @Test
   fun sourceUpdatePerformance() = measureCalibrationScenario("source_update_performance")
+
+  @Test
+  fun sourceScrollBalanced() = measureCalibrationScenario("source_scroll_balanced")
+
+  @Test
+  fun sourceScrollBalanced9() = measureCalibrationScenario("source_scroll_balanced_9")
 
   @Test
   fun sourceUpdateFixed0() = measureCalibrationScenario("source_update_fixed_0")
@@ -188,6 +206,57 @@ class GlassProfilingBenchmark {
     requireRuntimeMarker = false,
   )
 
+  @Test
+  fun sourceUpdateIndependent2() = measureScenario(
+    scenarioId = "source_update_independent_2",
+    includeMemory = true,
+    includeRedrawMetrics = true,
+  )
+
+  @Test
+  fun sourceUpdateContainer2() = measureScenario(
+    scenarioId = "source_update_container_2",
+    includeMemory = true,
+    includeRedrawMetrics = true,
+  )
+
+  @Test
+  fun lazyContainerScroll() = measureScenario("lazy_container_scroll", includeMemory = true)
+
+  @Test
+  fun containerGap2() = measureScenario(
+    scenarioId = "container_gap_2",
+    includeMemory = true,
+    includeRedrawMetrics = true,
+  )
+
+  @Test
+  fun containerJoinLeave() = measureScenario(
+    scenarioId = "container_join_leave",
+    includeMemory = true,
+    includeRedrawMetrics = true,
+  )
+
+  @Test
+  fun containerGroup3() = measureScenario(
+    scenarioId = "container_group_3",
+    includeMemory = true,
+    includeRedrawMetrics = true,
+  )
+
+  @Test
+  fun containerPress2() = measureScenario(
+    scenarioId = "container_press_2",
+    includeMemory = true,
+    includeRedrawMetrics = true,
+  )
+
+  @Test
+  fun lazyIndependentScroll() = measureScenario("lazy_independent_scroll", includeMemory = true)
+
+  @Test
+  fun effectAttachContainer2() = measureColdInitializationScenario("effect_attach_container_2")
+
   private fun measureColdInitializationScenario(scenarioId: String) {
     measureScenario(
       scenarioId = scenarioId,
@@ -221,21 +290,23 @@ class GlassProfilingBenchmark {
     includePreparationMetrics: Boolean = false,
     includeBackdropComparisonMetrics: Boolean = false,
     requireBackdropDraw: Boolean = false,
+    includeRedrawMetrics: Boolean = false,
   ) {
     // Stable-source scenarios still animate draw progress throughout the measured window.
     withoutUiAutomatorIdleWait(enabled = continuouslyAnimating) {
       benchmarkRule.measureRepeated(
-        packageName = GLASS_TARGET_PACKAGE,
+        packageName = TARGET_PACKAGE,
         metrics = glassMetrics(
           includeMemory = includeMemory,
           requireRuntimeMarker = requireRuntimeMarker,
           includePreparationMetrics = includePreparationMetrics,
           includeBackdropComparisonMetrics = includeBackdropComparisonMetrics,
           requireBackdropDraw = requireBackdropDraw,
+          includeRedrawMetrics = includeRedrawMetrics,
         ),
         compilationMode = CompilationMode.Full(),
         startupMode = StartupMode.WARM,
-        iterations = GLASS_BENCHMARK_ITERATIONS,
+        iterations = BENCHMARK_ITERATIONS,
         setupBlock = {
           startActivityAndWait { intent ->
             intent.selectBenchmarkSample(

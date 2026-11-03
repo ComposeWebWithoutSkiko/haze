@@ -22,13 +22,13 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavHostController
 import coil3.compose.AsyncImage
-import dev.chrisbanes.haze.ExperimentalHazeApi
 import dev.chrisbanes.haze.HazeInput
 import dev.chrisbanes.haze.blur.hazeBlur
 import dev.chrisbanes.haze.blur.materials.HazeMaterials
@@ -39,7 +39,6 @@ import dev.chrisbanes.haze.rememberHazeState
 
 @OptIn(
   ExperimentalMaterial3Api::class,
-  ExperimentalHazeApi::class,
   ExperimentalFoundationApi::class,
 )
 @Composable
@@ -92,10 +91,12 @@ fun ListWithStickyHeaders(navController: NavHostController, effect: SampleEffect
 
                   SampleEffect.Glass -> Modifier.hazeGlass(
                     input = HazeInput.Backdrop(hazeState),
-                    style = GlassStyle.regular.then {
-                      backgroundColor(glassBackgroundColor)
-                      tint(glassTint)
-                      shape(glassShape)
+                    style = remember(glassBackgroundColor, glassTint, glassShape) {
+                      GlassStyle.regular.then {
+                        backgroundColor(glassBackgroundColor)
+                        tint(glassTint)
+                        shape(glassShape)
+                      }
                     },
                   )
                 },

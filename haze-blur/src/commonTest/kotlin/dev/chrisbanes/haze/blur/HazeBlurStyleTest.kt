@@ -3,9 +3,11 @@
 
 package dev.chrisbanes.haze.blur
 
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import assertk.assertFailure
 import assertk.assertThat
@@ -18,6 +20,7 @@ import assertk.assertions.isNotEqualTo
 import assertk.assertions.isNull
 import assertk.assertions.isSameInstanceAs
 import dev.chrisbanes.haze.HazeProgressive
+import dev.chrisbanes.haze.InternalHazeApi
 import kotlin.test.Test
 
 class HazeBlurStyleTest {
@@ -34,35 +37,54 @@ class HazeBlurStyleTest {
   }
 
   @Test
-  fun equivalentStylePrograms_areEqual() {
-    val first = HazeBlurStyle {
-      blurEnabled(true)
-      blurRadius(24.dp)
-      backgroundColor(Color.Black)
-      colorEffects(listOf(HazeColorEffect.tint(Color.Red)))
-      alpha(0.8f)
-    }.then {
-      noiseFactor(0.2f)
-    }
-    val second = HazeBlurStyle {
-      blurEnabled(true)
-      blurRadius(24.dp)
-      backgroundColor(Color.Black)
-      colorEffects(listOf(HazeColorEffect.tint(Color.Red)))
-      alpha(0.8f)
-    }.then {
-      noiseFactor(0.2f)
-    }
+  fun styles_compareByIdentity() {
+    val first = HazeBlurStyle { blurRadius(24.dp) }
+    val second = HazeBlurStyle { blurRadius(24.dp) }
 
-    assertThat(first).isEqualTo(second)
+    assertThat(first).isEqualTo(first)
+    assertThat(first).isNotEqualTo(second)
+  }
+
+  @OptIn(InternalHazeApi::class)
+  @Test
+  fun blurStyle_comparesByIdentityWithoutInputsAndByValueWithInputs() {
+    val identity = HazeBlurStyle { blurRadius(24.dp) }
+    val value = valueBackedHazeBlurStyle("test", 24.dp) { blurRadius(24.dp) }
+    val equalValue = valueBackedHazeBlurStyle("test", 24.dp) { blurRadius(24.dp) }
+    val otherValue = valueBackedHazeBlurStyle("test", 32.dp) { blurRadius(32.dp) }
+
+    // Without inputs, only the same instance is equal.
+    assertThat(identity).isEqualTo(identity)
+    assertThat(identity.hashCode()).isEqualTo(identity.hashCode())
+    assertThat(identity).isNotEqualTo(HazeBlurStyle { blurRadius(24.dp) })
+    // With inputs, equal inputs are equal whichever block carries them.
+    assertThat(value).isEqualTo(equalValue)
+    assertThat(value.hashCode()).isEqualTo(equalValue.hashCode())
+    assertThat(value).isNotEqualTo(otherValue)
+    // The two modes never equal each other, and combinations compare their parts.
+    assertThat(value).isNotEqualTo(identity)
+    assertThat(identity).isNotEqualTo(value)
+    assertThat(value.then(otherValue)).isEqualTo(equalValue.then(otherValue))
+    assertThat(identity.then(value)).isNotEqualTo(HazeBlurStyle { blurRadius(24.dp) }.then(value))
+    // Both modes apply their writes when resolved.
+    assertThat(resolveHazeBlurStyle(HazeBlurStyle, value).blurRadius).isEqualTo(24.dp)
+    assertThat(resolveHazeBlurStyle(HazeBlurStyle, identity).blurRadius).isEqualTo(24.dp)
   }
 
   @Test
-  fun differentStylePrograms_areNotEqual() {
-    val first = HazeBlurStyle { blurRadius(24.dp) }
-    val second = HazeBlurStyle { blurRadius(25.dp) }
+  fun styleBlock_runsOnEachResolutionAndReadsCurrentState() {
+    val radius = mutableStateOf(8.dp)
+    var runs = 0
+    val style = HazeBlurStyle {
+      runs++
+      blurRadius(radius.value)
+    }
 
-    assertThat(first).isNotEqualTo(second)
+    assertThat(runs).isEqualTo(0)
+    assertThat(resolveHazeBlurStyle(HazeBlurStyle, style).blurRadius).isEqualTo(8.dp)
+    radius.value = 20.dp
+    assertThat(resolveHazeBlurStyle(HazeBlurStyle, style).blurRadius).isEqualTo(20.dp)
+    assertThat(runs).isEqualTo(2)
   }
 
   @Test
@@ -173,7 +195,7 @@ class HazeBlurStyleTest {
   }
 
   @Test
-  fun colorEffects_snapshotsCallerOwnedList() {
+  fun colorEffects_snapshotsCallerOwnedListWhenResolved() {
     val first = HazeColorEffect.tint(Color.Red)
     val second = HazeColorEffect.tint(Color.Blue)
     val input = mutableListOf(first)
@@ -181,10 +203,10 @@ class HazeBlurStyleTest {
       colorEffects(input)
     }
 
+    val resolved = resolveHazeBlurStyle(HazeBlurStyle, style)
     input += second
 
-    assertThat(resolveHazeBlurStyle(HazeBlurStyle, style).colorEffects)
-      .containsExactly(first)
+    assertThat(resolved.colorEffects).containsExactly(first)
   }
 
   @Test
@@ -209,12 +231,21 @@ class HazeBlurStyleTest {
   }
 
   @Test
-  fun blurRadius_rejectsNegativeValues() {
+  fun blurRadius_clampsNegativeValuesToZero() {
+    val style = HazeBlurStyle {
+      blurRadius((-1).dp)
+    }
+
+    assertThat(resolveHazeBlurStyle(HazeBlurStyle, style).blurRadius).isEqualTo(0.dp)
+  }
+
+  @Test
+  fun blurRadius_rejectsUnspecifiedValues() {
     assertFailure {
       resolveHazeBlurStyle(
         HazeBlurStyle,
         HazeBlurStyle {
-          blurRadius((-1).dp)
+          blurRadius(Dp.Unspecified)
         },
       )
     }.isInstanceOf<IllegalArgumentException>()

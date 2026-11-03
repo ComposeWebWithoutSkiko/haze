@@ -13,25 +13,68 @@ import android.graphics.BitmapShader
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
 import android.graphics.Matrix
-import android.graphics.RenderEffect as AndroidRenderEffect
 import android.graphics.RuntimeShader
 import android.graphics.Shader.TileMode.REPEAT
 import android.os.Build
 import androidx.annotation.RequiresApi
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shader
+import androidx.compose.ui.graphics.ShaderBrush
 import androidx.compose.ui.graphics.toArgb
+import dev.chrisbanes.haze.HazeProgressive
 import dev.chrisbanes.haze.InternalHazeApi
 import dev.chrisbanes.haze.PlatformContext
 import dev.chrisbanes.haze.PlatformRenderEffect
 import dev.chrisbanes.haze.createBlendRenderEffect
+import dev.chrisbanes.haze.createColorFilterRenderEffect
+import dev.chrisbanes.haze.createRuntimeEffect
+import dev.chrisbanes.haze.createRuntimeShaderRenderEffect
 import dev.chrisbanes.haze.createShaderRenderEffect
+import dev.chrisbanes.haze.then
+import dev.chrisbanes.haze.trace
 import kotlin.math.abs
 
 private var noiseTexture: Bitmap? = null
 
-private const val COMBINED_NOISE_TINT_SKSL = """
+internal actual fun ShaderBrush.createScaledShader(size: Size, scale: Float): Shader {
+  val shader = createShader(size)
+  if (scale == 1f) return shader
+
+  if (!isCustomShaderBrush()) {
+    // Compose's built-in gradients create a fresh shader with no local matrix.
+    return shader.apply { setLocalMatrix(Matrix().apply { setScale(scale, scale) }) }
+  }
+
+  // Evaluate the complete caller shader in logical coordinates. A local-matrix wrapper
+  // composes in the wrong order on Android when the caller shader has a translation.
+  check(Build.VERSION.SDK_INT >= 33)
+  return RuntimeShader(
+    """
+      uniform shader source;
+      uniform float scale;
+      half4 main(float2 coord) { return source.eval(coord / scale); }
+    """.trimIndent(),
+  ).apply {
+    setInputShader("source", shader)
+    setFloatUniform("scale", scale)
+  }
+}
+
+internal actual fun BlurVisualEffect.constrainInputScaleForBrushes(scale: Float): Float {
+  if (Build.VERSION.SDK_INT !in 31..32 || scale == 1f) return scale
+
+  // API 31–32 cannot transform an arbitrary shader without changing its local matrices.
+  // Keep capture and filtering at the same full resolution for these brushes.
+  val progressiveBrush = (progressive as? HazeProgressive.Brush)?.brush
+  val hasCustomBrush = mask?.isCustomShaderBrush() == true ||
+    progressiveBrush?.isCustomShaderBrush() == true ||
+    colorEffects.orEmpty().any { it is TintBrushHazeColorEffect && it.brush.isCustomShaderBrush() }
+  return if (hasCustomBrush) BLUR_FULL_RESOLUTION_SCALE else scale
+}
+
+internal const val COMBINED_NOISE_TINT_SKSL = """
   uniform shader content;
   uniform shader noise;
   uniform float noiseAlpha;
@@ -101,7 +144,7 @@ internal fun Context.getNoiseTexture(): Bitmap {
   }
 }
 
-private fun Context.createNoiseShader(scale: Float): BitmapShader {
+internal fun Context.createNoiseShader(scale: Float): BitmapShader {
   val normalizedScale = if (scale > 0f) scale else 1f
   return BitmapShader(getNoiseTexture(), REPEAT, REPEAT).apply {
     if (abs(normalizedScale - 1f) >= 0.001f) {
@@ -125,14 +168,23 @@ internal actual fun createCombinedNoiseTintRenderEffectOrNull(
 ): PlatformRenderEffect? {
   if (Build.VERSION.SDK_INT < 33) return null
 
-  val shader = RuntimeShader(COMBINED_NOISE_TINT_SKSL).apply {
-    setInputShader("noise", context.createNoiseShader(scale))
-    setFloatUniform("noiseAlpha", noiseFactor.coerceIn(0f, 1f))
-    setColorUniform("tintColor", tintColor.toArgb())
+  return trace("HazeBlur.combinedNoiseTint") {
+    // Animated styles miss the node effect cache every frame; compile this source once per process.
+    val postProcess = createRuntimeShaderRenderEffect(
+      effect = CombinedNoiseTintEffect,
+      shaderNames = arrayOf("content"),
+      inputs = arrayOf(null),
+    ) {
+      setChildShader("noise", context.createNoiseShader(scale))
+      setFloatUniform("noiseAlpha", noiseFactor.coerceIn(0f, 1f))
+      // Keep the packed sRGB tint that the per-effect RuntimeShader received.
+      setColorUniform("tintColor", Color(tintColor.toArgb()))
+    }
+    input.then(postProcess)
   }
-  val postProcess = AndroidRenderEffect.createRuntimeShaderEffect(shader, "content")
-  return AndroidRenderEffect.createChainEffect(postProcess, input)
 }
+
+private val CombinedNoiseTintEffect = createRuntimeEffect(COMBINED_NOISE_TINT_SKSL)
 
 @RequiresApi(31)
 internal actual fun createNoiseEffect(
@@ -143,10 +195,10 @@ internal actual fun createNoiseEffect(
 ): PlatformRenderEffect {
   // Apply scaling through the shader matrix so we can reuse the decoded bitmap.
   val noiseAlpha = noiseFactor.coerceIn(0f, 1f)
-  val baseNoiseEffect = AndroidRenderEffect.createShaderEffect(context.createNoiseShader(scale))
+  val baseNoiseEffect = createShaderRenderEffect(context.createNoiseShader(scale))
   val noiseEffect = if (noiseAlpha < 1f) {
     val matrix = ColorMatrix().apply { setScale(1f, 1f, 1f, noiseAlpha) }
-    AndroidRenderEffect.createColorFilterEffect(ColorMatrixColorFilter(matrix), baseNoiseEffect)
+    createColorFilterRenderEffect(ColorMatrixColorFilter(matrix), baseNoiseEffect)
   } else {
     baseNoiseEffect
   }

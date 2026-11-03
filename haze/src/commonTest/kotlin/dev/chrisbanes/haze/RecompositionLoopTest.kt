@@ -17,12 +17,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.test.ComposeUiTest
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.v2.runComposeUiTest
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import assertk.assertThat
+import assertk.assertions.isEqualTo
+import assertk.assertions.isGreaterThan
 import assertk.assertions.isNotNull
 import dev.chrisbanes.haze.test.ContextTest
 import kotlin.test.Test
@@ -31,29 +32,9 @@ import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.TestTimeSource
 import kotlin.time.TimeMark
 import kotlin.time.TimeSource
-import kotlinx.coroutines.TimeoutCancellationException
-import kotlinx.coroutines.withTimeout
 
 @OptIn(ExperimentalTestApi::class)
 class RecompositionLoopTest : ContextTest() {
-
-  companion object {
-    private const val IDLE_TIMEOUT_MS = 1000L
-  }
-
-  private suspend fun ComposeUiTest.awaitIdleWithTimeout(description: String) {
-    try {
-      withTimeout(IDLE_TIMEOUT_MS) {
-        waitForIdle()
-      }
-    } catch (e: TimeoutCancellationException) {
-      throw AssertionError(
-        "Infinite recomposition loop detected $description. " +
-          "waitForIdle() did not return within ${IDLE_TIMEOUT_MS}ms.",
-        e,
-      )
-    }
-  }
 
   @Test
   fun addingSourceNode_doesNotInfiniteLoop() = runComposeUiTest {
@@ -70,7 +51,7 @@ class RecompositionLoopTest : ContextTest() {
 
     showSource.value = true
 
-    awaitIdleWithTimeout("after adding source node")
+    awaitIdle()
   }
 
   @Test
@@ -88,7 +69,7 @@ class RecompositionLoopTest : ContextTest() {
 
     showSource.value = false
 
-    awaitIdleWithTimeout("after removing source node")
+    awaitIdle()
   }
 
   @Test
@@ -130,11 +111,54 @@ class RecompositionLoopTest : ContextTest() {
     detector.arm()
     showDialog.value = true
 
-    awaitIdleWithTimeout("after opening dialog with shared HazeState")
+    awaitIdle()
 
     showDialog.value = false
 
-    awaitIdleWithTimeout("after closing dialog with shared HazeState")
+    awaitIdle()
+  }
+
+  @Test
+  fun hazeEffect_inlineWhereSelectionKeepsInputAcrossRecompositions() = runComposeUiTest {
+    val hazeState = HazeState()
+    val tick = mutableIntStateOf(0)
+    var updates = 0
+    var compositions = 0
+    val factory = LoopDetectingRendererFactory { updates++ }
+
+    setContent {
+      tick.intValue
+      compositions++
+
+      // The lambda captures a value, so strong skipping remembers it across recompositions.
+      val excluded = "x"
+      Box(Modifier.hazeSource(hazeState, key = "x").size(100.dp)) {
+        GradientBox(
+          Modifier
+            .hazeEffect(
+              factory = factory,
+              input = HazeInput.Sources(
+                state = hazeState,
+                selection = HazeSourceSelection.Behind.where { source -> source.key != excluded },
+              ),
+              style = Unit,
+            )
+            .size(100.dp),
+        )
+      }
+    }
+    waitForIdle()
+
+    val updatesBefore = updates
+    val compositionsBefore = compositions
+
+    repeat(5) {
+      tick.intValue++
+      waitForIdle()
+    }
+
+    assertThat(compositions).isGreaterThan(compositionsBefore)
+    assertThat(updates).isEqualTo(updatesBefore)
   }
 
   @Test
@@ -173,7 +197,7 @@ class RecompositionLoopTest : ContextTest() {
     // Programmatic scroll gives a deterministic trigger for loop detection.
     listState.scrollToItem(25)
 
-    awaitIdleWithTimeout("after LazyColumn scroll")
+    awaitIdle()
   }
 
   @Test
@@ -211,7 +235,7 @@ class RecompositionLoopTest : ContextTest() {
     // Large list growth can churn source area bookkeeping; should still settle.
     itemCount.intValue = 50
 
-    awaitIdleWithTimeout("after LazyColumn item count change")
+    awaitIdle()
   }
 
   @Test

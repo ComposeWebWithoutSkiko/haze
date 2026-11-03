@@ -1,0 +1,463 @@
+// Copyright 2026, Christopher Banes and the Haze project contributors
+// SPDX-License-Identifier: Apache-2.0
+
+@file:OptIn(dev.chrisbanes.haze.InternalHazeApi::class)
+
+package dev.chrisbanes.haze.blur
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.size
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
+import androidx.compose.ui.graphics.GraphicsContext
+import androidx.compose.ui.graphics.layer.CompositingStrategy
+import androidx.compose.ui.graphics.layer.GraphicsLayer
+import androidx.compose.ui.layout.ScaleFactor
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.dp
+import androidx.test.core.app.ApplicationProvider
+import assertk.assertThat
+import assertk.assertions.isCloseTo
+import assertk.assertions.isEqualTo
+import assertk.assertions.isFalse
+import assertk.assertions.isLessThan
+import assertk.assertions.isNotNull
+import assertk.assertions.isNotSameInstanceAs
+import assertk.assertions.isNull
+import assertk.assertions.isSameInstanceAs
+import assertk.assertions.isTrue
+import dev.chrisbanes.haze.HazeEffectDrawScope
+import dev.chrisbanes.haze.HazeEffectFactory
+import dev.chrisbanes.haze.HazeEffectRenderer
+import dev.chrisbanes.haze.HazeEffectRuntimeDrawScope
+import dev.chrisbanes.haze.HazeInput
+import dev.chrisbanes.haze.HazePerformanceMode
+import dev.chrisbanes.haze.HazeSampling
+import dev.chrisbanes.haze.TrimMemoryLevel
+import dev.chrisbanes.haze.hazeEffect
+import dev.chrisbanes.haze.test.ScreenshotTest
+import dev.chrisbanes.haze.test.ScreenshotUiTest
+import dev.chrisbanes.haze.test.runScreenshotTest
+import kotlin.test.Test
+import org.robolectric.annotation.Config
+
+/**
+ * The RenderScript presentation block runs through [RenderScriptBlurVisualEffectDelegate.drawPresentation]
+ * so it can be driven without a RenderScript surface. The capture and padded layers need the surface
+ * and are covered by the device test.
+ */
+class RenderScriptLayerReuseAndroidHostTest : ScreenshotTest() {
+  private val context get() = ApplicationProvider.getApplicationContext<android.content.Context>()
+
+  @Test
+  @Config(sdk = [35])
+  fun drawPresentation_nonuniformCaptureScale_usesUnpaddedGeometryAndOffset() = runScreenshotTest {
+    val h = Harness(PLAIN)
+    h.factory.scale = 0.5f
+    h.factory.captureScale = ScaleFactor(0.6f, 0.3f)
+    h.factory.offset = Offset(5f, 7f)
+    h.factory.paddedOutput = true
+    setContent { h.Content() }
+    val pixels = frame()
+
+    // The unpadded 60x24 capture represents 100x80 logical pixels; the allocation is 64x32.
+    // At x=45, the capture samples x=(45.5+5)*0.6=30.3, halfway through the gradient.
+    assertThat(pixels[45, 20].red).isCloseTo(0.495f, 0.025f)
+    assertThat(pixels[45, 20].green).isCloseTo(0.505f, 0.025f)
+    // A black stripe at capture y=18..21 maps to output y=53..63, independently of x.
+    assertThat(pixels[45, 58].red).isCloseTo(0f, 0.025f)
+    assertThat(pixels[45, 58].blue).isCloseTo(0f, 0.025f)
+  }
+
+  @Test
+  @Config(sdk = [35])
+  fun drawPresentation_nonuniformCaptureScale_appliesMaskAndAlphaOnce() = runScreenshotTest {
+    val h = Harness(
+      HazeBlurStyle {
+        noiseFactor(0f)
+        alpha(0.5f)
+        mask(Brush.verticalGradient(listOf(Color.Black, Color.Transparent), endY = 100f))
+      },
+    )
+    h.factory.scale = 0.5f
+    h.factory.captureScale = ScaleFactor(0.6f, 0.3f)
+    h.factory.offset = Offset(5f, 7f)
+    h.factory.paddedOutput = true
+    setContent { h.Content() }
+    val pixels = frame()
+
+    // At this row the output has green=0.505; one mask and alpha composite over white.
+    val alpha = 0.5f * (1f - 20.5f / 100f)
+    assertThat(pixels[45, 20].green).isCloseTo(1f - alpha * (1f - 0.505f), 0.025f)
+    assertThat(pixels[45, 20].blue).isCloseTo(1f, 0.025f)
+  }
+
+  @Test
+  @Config(sdk = [35])
+  fun drawPresentation_repeatedDraws_reuseOnePresentationLayer() = runScreenshotTest {
+    val h = Harness(PLAIN)
+    setContent { h.Content() }
+    frame()
+    val layer = checkNotNull(h.delegate.presentationLayer.layer)
+
+    repeat(4) { h.redraw(this) }
+
+    assertThat(h.factory.draws).isEqualTo(5)
+    assertThat(h.delegate.presentationLayer.layer).isNotNull().isSameInstanceAs(layer)
+    assertThat(layer.isReleased).isFalse()
+  }
+
+  @Test
+  @Config(sdk = [35])
+  fun drawPresentation_maskAddedThenRemoved_restoresTheCompositingStrategy() = runScreenshotTest {
+    val h = Harness(PLAIN)
+    setContent { h.Content() }
+    frame()
+    val layer = checkNotNull(h.delegate.presentationLayer.layer)
+    assertThat(layer.compositingStrategy).isEqualTo(CompositingStrategy.Auto)
+    assertThat(layer.alpha).isEqualTo(1f)
+
+    h.update(MASKED)
+    h.redraw(this)
+    assertThat(layer.compositingStrategy).isEqualTo(CompositingStrategy.Offscreen)
+    assertThat(layer.alpha).isEqualTo(0.5f)
+
+    h.update(PLAIN)
+    h.redraw(this)
+    assertThat(h.delegate.presentationLayer.layer).isNotNull().isSameInstanceAs(layer)
+    assertThat(layer.compositingStrategy).isEqualTo(CompositingStrategy.Auto)
+    assertThat(layer.alpha).isEqualTo(1f)
+  }
+
+  @Test
+  @Config(sdk = [35])
+  fun drawPresentation_afterStyleChanges_matchesAFreshDelegate() = runScreenshotTest {
+    val h = Harness(MASKED)
+    setContent { h.Content() }
+    frame()
+    h.update(PLAIN)
+    h.redraw(this)
+    h.update(MASKED)
+    h.redraw(this)
+    h.update(NOISY)
+    val reused = h.redraw(this)
+
+    h.attachment++
+    val fresh = frame()
+
+    assertThat(maxDifference(reused, fresh)).isLessThan(0.01f)
+  }
+
+  @Test
+  @Config(sdk = [35])
+  fun drawPresentation_halfAlpha_compositesTheOutputOnce() = runScreenshotTest {
+    val h = Harness(HALF_ALPHA)
+    setContent { h.Content() }
+
+    // The output is opaque magenta at its left edge over a white root: half alpha leaves 0.5 green,
+    // and a second composite of the same layer would leave 0.25.
+    val pixels = frame()
+
+    assertThat(pixels[4, 40].green).isCloseTo(0.5f, 0.06f)
+  }
+
+  @Test
+  @Config(sdk = [30])
+  fun drawPresentation_saturationColorFilter_desaturatesTheOutput() = runScreenshotTest {
+    val h = Harness(DESATURATED)
+    setContent { h.Content() }
+
+    // The output is magenta at its left edge. Filtering it gives grey; filtering a white rectangle
+    // instead would cover the output with white.
+    val pixel = frame()[4, 40]
+
+    assertThat(pixel.red).isCloseTo(pixel.green, 0.03f)
+    assertThat(pixel.green).isCloseTo(pixel.blue, 0.03f)
+    assertThat(pixel.red).isLessThan(0.9f)
+  }
+
+  @Test
+  @Config(sdk = [30])
+  fun drawPresentation_colorFilterAfterTint_filtersTheTintedOutput() = runScreenshotTest {
+    val h = Harness(TINTED_THEN_DESATURATED)
+    setContent { h.Content() }
+
+    // The half-alpha blue tint turns the magenta edge into about (0.5, 0, 1), which desaturates to
+    // a luminance of about 0.18. Without the tint the filtered output would be about 0.29.
+    val pixel = frame()[4, 40]
+
+    assertThat(pixel.red).isCloseTo(pixel.green, 0.03f)
+    assertThat(pixel.green).isCloseTo(pixel.blue, 0.03f)
+    assertThat(pixel.red).isCloseTo(0.18f, 0.04f)
+  }
+
+  @Test
+  @Config(sdk = [35])
+  fun drawPresentation_withNoise_buildsTheShaderOnce() = runScreenshotTest {
+    val h = Harness(NOISY)
+    setContent { h.Content() }
+    frame()
+    repeat(4) { h.redraw(this) }
+    assertThat(h.delegate.noiseShaders.buildCount).isEqualTo(1)
+
+    h.factory.scale = 0.5f
+    h.redraw(this)
+    assertThat(h.delegate.noiseShaders.buildCount).isEqualTo(2)
+  }
+
+  @Test
+  @Config(sdk = [35])
+  fun clearRetainedOutput_releasesThePresentationLayerAndNoiseShader() =
+    assertReleased { it.clearRetainedOutput() }
+
+  @Test
+  @Config(sdk = [35])
+  fun onTrimMemory_moderate_releasesThePresentationLayerAndNoiseShader() =
+    assertReleased { it.onTrimMemory(HostLifecycleScope(context), TrimMemoryLevel.MODERATE) }
+
+  @Test
+  @Config(sdk = [35])
+  fun detach_releasesThePresentationLayerAndNoiseShader() = assertReleased { it.detach() }
+
+  @Test
+  @Config(sdk = [35])
+  fun invalidateRetainedOutput_keepsTheLayersAndNoiseShaderForTheNextDraw() = runScreenshotTest {
+    val h = Harness(NOISY)
+    setContent { h.Content() }
+    frame()
+    val graphicsContext = checkNotNull(h.factory.graphicsContext)
+    val capture = h.delegate.captureLayer.acquire(graphicsContext)
+    val padded = h.delegate.paddedLayer.acquire(graphicsContext, key = 1L)
+    val presentation = checkNotNull(h.delegate.presentationLayer.layer)
+
+    h.delegate.invalidateRetainedOutput()
+    h.redraw(this)
+
+    assertThat(h.delegate.captureLayer.layer).isNotNull().isSameInstanceAs(capture)
+    assertThat(h.delegate.paddedLayer.layer).isNotNull().isSameInstanceAs(padded)
+    assertThat(h.delegate.presentationLayer.layer).isNotNull().isSameInstanceAs(presentation)
+    assertThat(capture.isReleased).isFalse()
+    assertThat(padded.isReleased).isFalse()
+    assertThat(presentation.isReleased).isFalse()
+    assertThat(h.delegate.noiseShaders.buildCount).isEqualTo(1)
+  }
+
+  @Test
+  @Config(sdk = [35])
+  fun draw_withAnEmptyScaledSize_releasesTheKeptCaptureAndPaddedLayers() = runScreenshotTest {
+    val h = Harness(NOISY)
+    setContent { h.Content() }
+    frame()
+    val graphicsContext = checkNotNull(h.factory.graphicsContext)
+    val capture = h.delegate.captureLayer.acquire(graphicsContext)
+    val padded = h.delegate.paddedLayer.acquire(graphicsContext, key = 1L)
+
+    // An empty layer creates no capture, so the full draw stops before it starts an update.
+    h.factory.drawsEmptyLayer = true
+    h.delegate.invalidateRetainedOutput()
+    h.redraw(this)
+
+    assertThat(capture.isReleased).isTrue()
+    assertThat(padded.isReleased).isTrue()
+    assertThat(h.delegate.captureLayer.layer).isNull()
+    assertThat(h.delegate.paddedLayer.layer).isNull()
+  }
+
+  @Test
+  @Config(sdk = [35])
+  fun onTrimMemory_background_keepsThePresentationLayerAndNoiseShader() = runScreenshotTest {
+    val h = Harness(NOISY)
+    setContent { h.Content() }
+    frame()
+    val layer = checkNotNull(h.delegate.presentationLayer.layer)
+
+    h.delegate.onTrimMemory(HostLifecycleScope(context), TrimMemoryLevel.BACKGROUND)
+    h.redraw(this)
+
+    assertThat(h.delegate.presentationLayer.layer).isNotNull().isSameInstanceAs(layer)
+    assertThat(h.delegate.noiseShaders.buildCount).isEqualTo(1)
+  }
+
+  private fun assertReleased(release: (RenderScriptBlurVisualEffectDelegate) -> Unit) = runScreenshotTest {
+    val h = Harness(NOISY)
+    setContent { h.Content() }
+    frame()
+    val layer = checkNotNull(h.delegate.presentationLayer.layer)
+    assertThat(h.delegate.noiseShaders.buildCount).isEqualTo(1)
+
+    release(h.delegate)
+
+    assertThat(layer.isReleased).isTrue()
+    assertThat(h.delegate.presentationLayer.layer).isNull()
+
+    h.redraw(this)
+    assertThat(h.delegate.presentationLayer.layer).isNotNull().isNotSameInstanceAs(layer)
+    assertThat(h.delegate.noiseShaders.buildCount).isEqualTo(2)
+  }
+
+  /** Draws the presentation of one RenderScript delegate with a Blur runtime styled by [update]. */
+  private inner class Harness(initial: HazeBlurStyle) {
+    val effect = BlurVisualEffect()
+    val factory = PresentationFactory(effect)
+    private var tick by mutableStateOf(0)
+    var attachment by mutableStateOf(0)
+
+    val delegate get() = checkNotNull(factory.delegate)
+
+    init {
+      update(initial)
+    }
+
+    fun update(style: HazeBlurStyle) {
+      effect.update(
+        HostLifecycleScope(context),
+        BlurConfiguration(style, HazePerformanceMode.Quality),
+        HazeSampling.FullResolution,
+      )
+    }
+
+    /** Forces the next frame to run the renderer's draw again. */
+    fun redraw(test: ScreenshotUiTest) = test.run {
+      tick++
+      frame()
+    }
+
+    @androidx.compose.runtime.Composable
+    fun Content() {
+      key(attachment) {
+        Box(Modifier.fillMaxSize().background(Color.White)) {
+          Box(
+            Modifier.size(100.dp).hazeEffect(
+              factory = factory,
+              input = HazeInput.Content,
+              style = tick,
+            ),
+          )
+        }
+      }
+    }
+  }
+
+  private class PresentationFactory(val effect: BlurVisualEffect) : HazeEffectFactory<Int> {
+    var scale = 1f
+    var captureScale = ScaleFactor(1f, 1f)
+    var offset = Offset.Zero
+    var paddedOutput = false
+
+    /** Runs the delegate's whole draw, over an empty layer, instead of only its presentation. */
+    var drawsEmptyLayer = false
+    var draws = 0
+      private set
+
+    /** The delegate of the latest renderer, built by its first draw. */
+    var delegate: RenderScriptBlurVisualEffectDelegate? = null
+      private set
+
+    /** The graphics context of the latest draw. */
+    var graphicsContext: GraphicsContext? = null
+      private set
+
+    override fun createRenderer(): HazeEffectRenderer<Int> = object : HazeEffectRenderer<Int> {
+      private var own: RenderScriptBlurVisualEffectDelegate? = null
+      private var output: GraphicsLayer? = null
+      private var outputOwner: GraphicsContext? = null
+
+      override fun HazeEffectDrawScope.draw(style: Int) {
+        val runtime = this as HazeEffectRuntimeDrawScope
+        val graphicsContext = runtime.requireGraphicsContext()
+        this@PresentationFactory.graphicsContext = graphicsContext
+        val current = own ?: RenderScriptBlurVisualEffectDelegate(
+          effect,
+          graphicsContext,
+          runtime.requirePlatformContext(),
+        ).also {
+          own = it
+          delegate = it
+        }
+        val layer = output ?: graphicsContext.createGraphicsLayer().also {
+          it.record(if (paddedOutput) IntSize(64, 32) else IntSize(256, 256)) {
+            if (paddedOutput) {
+              drawRect(Color.Yellow)
+              drawRect(Brush.horizontalGradient(listOf(Color.Magenta, Color.Cyan), endX = 60f), size = Size(60f, 24f))
+              drawRect(Color.Black, topLeft = Offset(0f, 18f), size = Size(60f, 3f))
+            } else {
+              drawRect(Brush.horizontalGradient(listOf(Color.Magenta, Color.Cyan)))
+            }
+          }
+          output = it
+          outputOwner = graphicsContext
+        }
+        with(current) {
+          if (drawsEmptyLayer) {
+            draw(
+              object : HazeEffectRuntimeDrawScope by runtime {
+                override val layerSize: Size = Size.Zero
+                override val hasDrawableInput: Boolean = true
+              },
+            )
+          } else {
+            drawPresentation(runtime, layer, offset, scale, captureScale)
+          }
+        }
+        draws++
+      }
+
+      // Haze disposes the renderer on a new attachment and at teardown; release what it owns.
+      override fun dispose() {
+        own?.detach()
+        output?.takeUnless { it.isReleased }?.let { outputOwner?.releaseGraphicsLayer(it) }
+        output = null
+      }
+    }
+  }
+}
+
+private val PLAIN = HazeBlurStyle {
+  noiseFactor(0f)
+}
+
+private val HALF_ALPHA = HazeBlurStyle {
+  noiseFactor(0f)
+  alpha(0.5f)
+}
+
+private val MASKED = HazeBlurStyle {
+  noiseFactor(0f)
+  alpha(0.5f)
+  mask(Brush.verticalGradient(listOf(Color.Black, Color.Transparent)))
+  colorEffects(listOf(HazeColorEffect.tint(Color.Red.copy(alpha = 0.3f))))
+}
+
+private val NOISY = HazeBlurStyle {
+  noiseFactor(0.5f)
+  alpha(0.75f)
+  colorEffects(listOf(HazeColorEffect.tint(Color.Blue.copy(alpha = 0.2f))))
+}
+
+private val DESATURATE = ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0f) })
+
+private val DESATURATED = HazeBlurStyle {
+  noiseFactor(0f)
+  colorEffects(listOf(HazeColorEffect.colorFilter(DESATURATE)))
+}
+
+private val TINTED_THEN_DESATURATED = HazeBlurStyle {
+  noiseFactor(0f)
+  colorEffects(
+    listOf(
+      HazeColorEffect.tint(Color.Blue.copy(alpha = 0.5f)),
+      HazeColorEffect.colorFilter(DESATURATE),
+    ),
+  )
+}

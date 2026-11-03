@@ -5,24 +5,20 @@ package dev.chrisbanes.haze.glass
 
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Paint
 import androidx.compose.ui.graphics.drawscope.DrawScope
-import androidx.compose.ui.graphics.drawscope.clipRect
-import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.drawscope.translate
-import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.layer.CompositingStrategy
 import androidx.compose.ui.graphics.layer.GraphicsLayer
 import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.unit.IntSize
-import androidx.compose.ui.unit.roundToIntSize
+import androidx.compose.ui.unit.toSize
 import dev.chrisbanes.haze.ExperimentalHazeApi
 import dev.chrisbanes.haze.HazeEffectRuntimeDrawScope
 import dev.chrisbanes.haze.InternalHazeApi
-import kotlin.math.max
+import kotlin.math.ceil
+import kotlin.math.floor
 
 internal fun DrawScope.recordDepthMix(
   layer: GraphicsLayer,
@@ -48,7 +44,7 @@ internal fun DrawScope.recordDepthMix(
   drawBlurred: DrawScope.() -> Unit,
 ) {
   layer.compositingStrategy = CompositingStrategy.Offscreen
-  layer.record(size) {
+  recordGlassLayer(layer, size) {
     withLayerPaint(alpha = 1f - depth, blendMode = BlendMode.SrcOver) {
       drawSource()
     }
@@ -58,21 +54,60 @@ internal fun DrawScope.recordDepthMix(
   }
 }
 
-private inline fun DrawScope.withLayerPaint(
+internal inline fun DrawScope.withLayerPaint(
   alpha: Float,
   blendMode: BlendMode,
+  bounds: Rect = Rect(Offset.Zero, size),
   block: DrawScope.() -> Unit,
 ) {
   val canvas = drawContext.canvas
-  val paint = Paint().apply {
-    this.alpha = alpha
-    this.blendMode = blendMode
-  }
-  canvas.saveLayer(Rect(Offset.Zero, size), paint)
+  glassLayerBoundsForTest?.invoke(bounds)
+  val paint = LayerPaints.acquire(alpha, blendMode)
   try {
-    block()
+    canvas.saveLayer(bounds, paint)
+    try {
+      block()
+    } finally {
+      canvas.restore()
+    }
   } finally {
-    canvas.restore()
+    LayerPaints.release()
+  }
+}
+
+/** Receives every [withLayerPaint] bound before its `saveLayer`, so tests can check layer sizes. */
+internal var glassLayerBoundsForTest: ((Rect) -> Unit)? = null
+
+/**
+ * The part of this rect within [visible], rounded out to whole pixels, or [Rect.Zero] when they
+ * do not overlap. A null [visible] returns this rect unchanged.
+ */
+internal fun Rect.visiblePart(visible: Rect?): Rect {
+  if (visible == null) return this
+  val part = intersect(visible)
+  if (part.isEmpty) return Rect.Zero
+  return Rect(floor(part.left), floor(part.top), ceil(part.right), ceil(part.bottom))
+}
+
+/**
+ * Paints for [withLayerPaint], one per nesting depth. A layer keeps its paint for the whole
+ * block, so an inner layer takes the next paint instead of changing an enclosing layer's alpha or
+ * blend mode. Drawing is single-threaded, so this is not thread-safe, like haze-blur's `PaintPool`.
+ */
+internal object LayerPaints {
+  private val paints = ArrayList<Paint>()
+  private var depth = 0
+
+  fun acquire(alpha: Float, blendMode: BlendMode): Paint {
+    if (depth == paints.size) paints += Paint()
+    return paints[depth++].also {
+      it.alpha = alpha
+      it.blendMode = blendMode
+    }
+  }
+
+  fun release() {
+    depth--
   }
 }
 
@@ -80,55 +115,12 @@ private inline fun DrawScope.withLayerPaint(
 internal fun DrawScope.drawInputWithAlpha(
   context: HazeEffectRuntimeDrawScope,
   alpha: Float,
+  bounds: Rect,
 ) {
-  withLayerPaint(alpha = alpha, blendMode = BlendMode.SrcOver) {
-    with(context) { this@drawInputWithAlpha.drawInput() }
-  }
-}
-
-@OptIn(ExperimentalHazeApi::class, InternalHazeApi::class)
-internal fun DrawScope.createScaledContentLayer(
-  context: HazeEffectRuntimeDrawScope,
-  backgroundColor: Color,
-  scaleFactor: Float,
-  layerSize: Size,
-  existingLayer: GraphicsLayer? = null,
-): GraphicsLayer? {
-  val scaledLayerSize = (layerSize * scaleFactor).roundToIntSize()
-
-  if (scaledLayerSize.width <= 0 || scaledLayerSize.height <= 0) {
-    return null
-  }
-
-  val graphicsContext = context.requireGraphicsContext()
-  val layer = existingLayer?.takeUnless { it.isReleased }
-    ?: graphicsContext.createGraphicsLayer()
-
-  layer.record(size = scaledLayerSize) {
-    if (backgroundColor.alpha > 0f) {
-      drawRect(backgroundColor)
-    }
-
-    scale(scale = scaleFactor, pivot = Offset.Zero) {
-      with(context) { this@record.drawInput() }
-    }
-  }
-
-  return layer
-}
-
-internal fun DrawScope.drawScaledContent(
-  offset: Offset,
-  scaledSize: Size,
-  clip: Boolean = true,
-  block: DrawScope.() -> Unit,
-) {
-  val scaleFactor = max(size.width / scaledSize.width, size.height / scaledSize.height)
-  withTransform({ if (clip) clipRect() }) {
-    translate(offset) {
-      scale(scale = scaleFactor, pivot = Offset.Zero) {
-        block()
-      }
+  withLayerPaint(alpha = alpha, blendMode = BlendMode.SrcOver, bounds = bounds) {
+    // drawInput() draws in expanded-layer space, but this draw is in effect space.
+    translate(-context.layerOffset.x, -context.layerOffset.y) {
+      with(context) { this@translate.drawInput() }
     }
   }
 }
@@ -143,17 +135,17 @@ internal inline fun DrawScope.recordAndDrawGlassGroupAlpha(
   layer.blendMode = BlendMode.SrcOver
   layer.compositingStrategy = CompositingStrategy.Offscreen
   layer.renderEffect = null
-  layer.record(size = size) { block() }
+  recordGlassLayer(layer, size) { block() }
   drawLayer(layer)
 }
 
-internal inline fun DrawScope.translate(
-  offset: Offset,
-  block: DrawScope.() -> Unit,
+// GraphicsLayer caches its outline independently of its recording size. Refresh it for retained
+// stages in their own recording space, including local patches and output-space alpha groups.
+internal inline fun DrawScope.recordGlassLayer(
+  layer: GraphicsLayer,
+  size: IntSize,
+  crossinline block: DrawScope.() -> Unit,
 ) {
-  if (offset != Offset.Zero) {
-    translate(offset.x, offset.y, block)
-  } else {
-    block()
-  }
+  layer.record(size = size) { block() }
+  layer.setRectOutline(size = size.toSize())
 }

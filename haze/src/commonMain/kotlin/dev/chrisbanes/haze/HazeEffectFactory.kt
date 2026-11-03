@@ -8,16 +8,27 @@ import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.geometry.isFinite
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.GraphicsContext
+import androidx.compose.ui.graphics.Shader
+import androidx.compose.ui.graphics.ShaderBrush
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.graphics.layer.GraphicsLayer
 import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.input.pointer.PointerEvent
+import androidx.compose.ui.layout.ScaleFactor
 import androidx.compose.ui.node.currentValueOf
 import androidx.compose.ui.node.requireDensity
 import androidx.compose.ui.node.requireGraphicsContext
 import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.roundToIntSize
+import kotlin.math.ceil
+import kotlin.math.max
 import kotlinx.coroutines.CoroutineScope
 
 /**
@@ -122,6 +133,10 @@ public interface HazeEffectRendererLifecycle<Style> {
 /** Built-in-only resources used while a renderer is attached to one modifier node. */
 @InternalHazeApi
 public interface HazeEffectLifecycleScope {
+  /** Opaque core capability used by built-ins to relocate surface output. */
+  public val surface: HazeEffectSurface
+    get() = error("Surface relocation requires an attached Haze node")
+
   /** Current size of the modifier carrying the effect. */
   public val modifierSize: Size
 
@@ -327,7 +342,11 @@ public interface HazeEffectRuntimeDrawScope : HazeEffectDrawScope {
   /** Schedules a redraw of the effect. */
   public fun invalidateDraw()
 
-  /** Draws the selected input into this [DrawScope]. */
+  /**
+   * Draws the selected input into this [DrawScope], in the coordinate space of the expanded effect
+   * layer, where the modifier sits at [layerOffset]. A caller drawing in modifier space must
+   * translate by `-layerOffset` first.
+   */
   public fun DrawScope.drawInput()
 }
 
@@ -343,6 +362,119 @@ public inline fun <R> HazeEffectRuntimeDrawScope.withGraphicsLayer(
   } finally {
     graphicsContext.releaseGraphicsLayer(layer)
   }
+}
+
+/** Runs [block] translated by [offset], or untranslated when [offset] is zero or not finite. */
+@InternalHazeApi
+public inline fun DrawScope.translate(
+  offset: Offset,
+  block: DrawScope.() -> Unit,
+) {
+  if (offset.isFinite && offset != Offset.Zero) {
+    translate(offset.x, offset.y, block)
+  } else {
+    block()
+  }
+}
+
+/**
+ * Draws [block], recorded at [scaledSize], scaled up to fill this scope and translated by
+ * [offset]. Clips to this scope when [clip] is true.
+ */
+@InternalHazeApi
+public fun DrawScope.drawScaledContent(
+  offset: Offset,
+  scaledSize: Size,
+  clip: Boolean = true,
+  block: DrawScope.() -> Unit,
+) {
+  val scaleFactor = max(size.width / scaledSize.width, size.height / scaledSize.height)
+  withTransform({ if (clip) clipRect() }) {
+    translate(offset) {
+      scale(scale = scaleFactor, pivot = Offset.Zero) {
+        block()
+      }
+    }
+  }
+}
+
+/** Draws content recorded with a per-axis capture scale back at its original geometry. */
+@InternalHazeApi
+public fun DrawScope.drawScaledContent(
+  offset: Offset,
+  captureScale: ScaleFactor,
+  clip: Boolean = true,
+  block: DrawScope.() -> Unit,
+) {
+  withTransform({ if (clip) clipRect() }) {
+    translate(offset) {
+      scale(scaleX = 1f / captureScale.scaleX, scaleY = 1f / captureScale.scaleY, pivot = Offset.Zero) {
+        block()
+      }
+    }
+  }
+}
+
+/** Returns the actual per-axis scale after rounding a uniformly scaled capture to integer pixels. */
+@InternalHazeApi
+public fun scaledContentScale(layerSize: Size, scaleFactor: Float): ScaleFactor {
+  val captureSize = (layerSize * scaleFactor).roundToIntSize()
+  if (captureSize.width <= 0 || captureSize.height <= 0) return ScaleFactor(scaleFactor, scaleFactor)
+  return ScaleFactor(captureSize.width / layerSize.width, captureSize.height / layerSize.height)
+}
+
+/**
+ * Records the effect input of [context], scaled by [scaleFactor], into [existingLayer] (or a new
+ * layer when it is null or released) over the shader [backgroundShader] returns or, without one,
+ * [backgroundColor].
+ *
+ * [backgroundShader] runs each time the layer's draw block runs, including when the platform
+ * replays the block after dropping the layer's display list. Produce the shader there, rather than
+ * capturing one, so a shader whose uniforms are shared is configured and drawn in the same call.
+ *
+ * Returns null without creating a layer when the scaled [layerSize] is empty.
+ * When [fillCapture] is true, the input fills the rounded allocation independently on each axis;
+ * present that capture with the matching [drawScaledContent] overload and [scaledContentScale].
+ */
+@InternalHazeApi
+public fun DrawScope.createScaledContentLayer(
+  context: HazeEffectRuntimeDrawScope,
+  backgroundColor: Color,
+  scaleFactor: Float,
+  layerSize: Size,
+  existingLayer: GraphicsLayer? = null,
+  backgroundShader: (() -> Shader?)? = null,
+  fillCapture: Boolean = false,
+): GraphicsLayer? {
+  val scaledLayerSize = (layerSize * scaleFactor).roundToIntSize()
+
+  if (scaledLayerSize.width <= 0 || scaledLayerSize.height <= 0) {
+    return null
+  }
+
+  val layer = existingLayer?.takeUnless { it.isReleased }
+    ?: context.requireGraphicsContext().createGraphicsLayer()
+
+  layer.record(size = scaledLayerSize) {
+    val shader = backgroundShader?.invoke()
+    if (shader != null) {
+      drawRect(ShaderBrush(shader))
+    } else if (backgroundColor.alpha > 0f) {
+      drawRect(backgroundColor)
+    }
+
+    val actualScale = if (fillCapture) scaledContentScale(layerSize, scaleFactor) else ScaleFactor(scaleFactor, scaleFactor)
+    scale(scaleX = actualScale.scaleX, scaleY = actualScale.scaleY, pivot = Offset.Zero) {
+      with(context) { this@record.drawInput() }
+    }
+  }
+
+  // Refresh the outline when a retained layer is resized. Round it outward independently of the
+  // capture allocation: rounding down can clip the last output row or column after upscaling.
+  val outlineSize = if (fillCapture) Size(scaledLayerSize.width.toFloat(), scaledLayerSize.height.toFloat()) else layerSize * scaleFactor
+  layer.setRectOutline(size = Size(ceil(outlineSize.width), ceil(outlineSize.height)))
+
+  return layer
 }
 
 @OptIn(InternalHazeApi::class)
@@ -385,9 +517,7 @@ internal class HazeEffectDrawScopeImpl(
           owner.sourceTransformInEffect(area)
         }
         withTransform({ transform(sourceTransform) }) {
-          val layer = area.contentLayer
-            ?.takeUnless { it.isReleased }
-            ?.takeUnless { it.size.width <= 0 || it.size.height <= 0 }
+          val layer = area.drawableContentLayer
           if (layer != null) {
             drawLayer(layer)
           }
@@ -421,6 +551,7 @@ internal class HazeEffectLayoutScopeImpl(
 internal class HazeEffectLifecycleScopeImpl(
   private val node: HazeEffectNode,
 ) : HazeEffectLifecycleScope {
+  override val surface: HazeEffectSurface get() = node.surface
   override val modifierSize: Size get() = node.size
   override val coroutineScope: CoroutineScope get() = node.coroutineScope
   override fun requirePlatformContext(): PlatformContext = node.requirePlatformContext()

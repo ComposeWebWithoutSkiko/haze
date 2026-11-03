@@ -5,7 +5,6 @@ package dev.chrisbanes.haze.glass
 
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import dev.chrisbanes.haze.ExperimentalHazeApi
 import kotlin.jvm.JvmInline
 
 /**
@@ -15,8 +14,9 @@ import kotlin.jvm.JvmInline
  * This type does not define interpolation for arbitrary [T]. [GlassOptics] accepts
  * [OpticalSizeValue] only for its `Float` depth and [Dp] blur-radius properties and owns the
  * corresponding interpolation and value validation.
+ *
+ * Future minor releases may add subtypes. Keep an `else` branch when you match exhaustively with `when`.
  */
-@ExperimentalHazeApi
 public sealed interface OpticalSizeValue<T> {
   /** A value which does not change with the material size. */
   @JvmInline
@@ -74,7 +74,6 @@ public sealed interface OpticalSizeValue<T> {
  * @param shortestDimension The positive shortest dimension at which [value] applies.
  * @param value The value to resolve at [shortestDimension].
  */
-@ExperimentalHazeApi
 public data class OpticalSizePoint<T>(
   val shortestDimension: Dp,
   val value: T,

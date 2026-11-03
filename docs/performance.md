@@ -6,9 +6,9 @@ looks right and feels smooth.
 
 ## Start with the defaults
 
-Use `HazePerformanceMode.Default` for built-in Blur and Glass, and start Glass with
-`GlassStyle.regular`. `Default` selects the fixed `Balanced` profile. Custom effects use
-`HazeSampling.Default`.
+Use [`HazePerformanceMode.Default`][HazePerformanceMode.Default] for built-in Blur and Glass, and start Glass with
+[`GlassStyle.regular`][GlassStyle.regular]. `Default` selects the fixed `Balanced` profile. Custom effects use
+[`HazeSampling.Default`][HazeSampling.Default].
 
 Build the complete screen before choosing overrides. The area covered by effects, their number,
 and the content moving behind them all affect the cost.
@@ -46,13 +46,81 @@ Try these changes in order, measuring after each:
 4. **Simplify the styling.** Try uniform blur in place of progressive blur, or reduce Glass
    features such as Full chromatic aberration. Keep the simpler style if the visual difference
    does not justify the cost.
-5. **Keep unrelated animation out of captured sources.** With `HazeInput.Sources`, move animation
-   outside the `hazeSource` subtree when the effect does not need to include it.
+5. **Keep unrelated animation out of captured sources.** With [`HazeInput.Sources`][HazeInput.Sources], move animation
+   outside the [`hazeSource`][hazeSource] subtree when the effect does not need to include it.
 
 <a id="stable-and-changing-sources"></a>
 
 A stable source can reuse captured and processed output. Scrolling or animated backgrounds need
 fresh input, so always test those interactions as well as stationary content.
+
+<a id="input-sharing"></a>
+
+## Share one source render between effects
+
+By default, each effect that samples a [`hazeSource`][hazeSource] through
+[`HazeInput.Sources`][HazeInput.Sources] replays the source's content whenever it changes. A
+busy source, such as a feed with playing video, then costs more for every effect over it.
+
+The experimental `inputSharing` parameter changes that on Android. While sharing is active, the
+source renders once into an offscreen layer, and the window and every effect draw from that layer
+instead of replaying the source. The activation rules are
+[`HazeInputSharing`][HazeInputSharing]'s: `Never` is the default, `Auto` shares on Android once
+two or more effects sample the source, and `Always` shares once one does. Only Android reuses a
+render. On Desktop, iOS and Web, `Always` applies the clipping and an offscreen pass without
+reuse, so the source is still replayed for each effect, and it can cost more than `Never`. Haze
+has not measured that path.
+
+Sharing has two costs:
+
+- **Clipping.** While sharing is active, the source's drawing is clipped to its layout bounds,
+  expanded by `inputSharingOutsets`, both on screen and in effects. Anything drawn beyond that is
+  not shown. Outsets don't change the source's layout size or position, and they have no effect
+  while sharing is inactive, when the source draws normally again, overflow included.
+- **Memory.** On a Pixel 8a, each active full-screen source added about 25–33 MiB of peak GPU
+  memory, more than one source-sized RGBA8 buffer. The benchmark did not isolate the cause, so
+  budget well above one source-sized buffer per shared source.
+
+`Auto` re-decides on every draw (Android only). As effects come and go, crossing between one and
+two consumers allocates or frees the source-sized layer and turns the overflow clipping on or off.
+Use `Always` for a source that draws outside its bounds.
+
+Count each member of a Glass container, not each cluster, when you judge whether `Auto` shares.
+Every member is its own consumer, even when its cluster samples the source once, so two members
+over one source are enough.
+
+`inputSharing` is experimental, so opt in with `@OptIn(ExperimentalHazeApi::class)`. For a source
+that stays inside its bounds, the default zero outsets are enough:
+
+```kotlin
+Modifier.hazeSource(state, inputSharing = HazeInputSharing.Auto)
+```
+
+If the source draws outside its bounds, for example a card with a shadow that reaches 4 dp to each
+side and 16 dp below it, declare that on each edge. The edges are absolute and don't flip in a
+right-to-left layout, so adjust them for the layout direction:
+
+```kotlin
+Modifier.hazeSource(
+  state = state,
+  inputSharing = HazeInputSharing.Auto,
+  inputSharingOutsets = LayerOutsets(left = 4.dp, top = 0.dp, right = 4.dp, bottom = 16.dp),
+)
+```
+
+Start with `Never`, and try sharing when the RenderThread spends its time replaying a source that
+several effects sample. Compare both settings with the same interaction on your target devices:
+look at CPU frame duration and frame overrun, at peak GPU memory, and at whether the clipped
+edges still look right. CPU frame duration does not measure GPU work, and the offscreen layer is
+re-rendered whenever the source changes, which adds GPU work while a source scrolls or animates.
+
+In Haze's nested-source benchmark, sharing the inner feed source cut its replays from seven per
+frame to one. On a Pixel 8a, that lowered P90 CPU frame duration by 2–6% and mean `DrawFrames`
+time by 6–8%. Each active source added about 25–33 MiB of peak GPU memory. The P90 gains
+were 0.15–0.50 ms, comparable to the variation between passes of up to 0.42 ms, and sharing the
+outer source as well usually gave a smaller gain. This is one device and one synthetic feed, and
+the benchmark measured no GPU time, so it does not predict your screen. See
+[the measurements and their limits](benchmark-results.md#input-sharing).
 
 <a id="input-scale"></a>
 <a id="performance-mode"></a>
@@ -61,7 +129,7 @@ fresh input, so always test those interactions as well as stationary content.
 
 ## Choose a performance mode
 
-`HazePerformanceMode` controls the quality and rendering cost of built-in Blur and Glass. Choose
+[`HazePerformanceMode`][HazePerformanceMode] controls the quality and rendering cost of built-in Blur and Glass. Choose
 based on the problem you can see:
 
 | What you need | What to try |
@@ -81,20 +149,21 @@ Modifier.hazeBlur(
 )
 ```
 
-The same `performanceMode` parameter is available on `hazeGlass`. Profiles keep the chosen quality
-setting fixed. `Performance`, `Balanced`, and `Quality` correspond to
-`Fixed(0f)`, `Fixed(0.5f)`, and `Fixed(1f)`. The fraction describes quality, not a percentage
-reduction in rendering time.
+The same `performanceMode` parameter is available on [`hazeGlass`][hazeGlass]. To set a mode for a whole
+subtree, provide [`LocalHazePerformanceMode`][LocalHazePerformanceMode]; an explicit `performanceMode` argument overrides it.
+
+`Performance`, `Balanced`, and `Quality` correspond to `Fixed(0f)`, `Fixed(0.5f)`, and
+`Fixed(1f)`. The fraction describes quality, not a percentage reduction in rendering time.
 
 !!! note "Measured quality trade-offs"
 
-    In a two-pass Pixel 8a test at 60 Hz with a changing background, Glass `Balanced` left about
-    **8.1 ms** of frame-deadline headroom at P90, compared with **7.0 ms** for `Quality`. Glass
-    `Performance` used roughly **9% less peak GPU memory** than `Quality` in both stable and
-    changing-background tests, comparing the mean of the two pass-level medians for each mode
-    and workload. Each method ran eight iterations in both forward and reverse order. These are
-    useful reference points, not guaranteed savings on another screen. See the [full mode
-    comparison](benchmark-results.md#performance-mode-calibration).
+    In a two-pass test on a Pixel 8a (Android 17, 60 Hz, fixed-performance mode) with a changing
+    background, Glass `Balanced` left about **7.9 ms** of frame-deadline headroom at P90,
+    compared with **6.7 ms** for `Quality`. Glass `Performance` used roughly **9% less peak GPU
+    memory** than `Quality` in both stable and changing-background tests, comparing each method's
+    peak-memory median. Each method ran eight measured iterations in each pass. These are
+    reference points, not guaranteed savings or a universal mode ranking. See the [full mode
+    comparison and its limits](benchmark-results.md#performance-mode-calibration).
 
 Keep a fixed override only when repeated measurements and visual checks show a useful benefit.
 A lower quality setting does not guarantee a lower CPU frame time in every workload.
@@ -122,20 +191,36 @@ Check an effect's first appearance separately from its ongoing animation: smooth
 not rule out a pause when a Glass surface is first created. Include lighting, refraction, and
 transform changes during interaction in your measurements.
 
-For styling examples, see the [Glass overview](effects/glass.md).
+Use a [Glass container](effects/glass/containers.md) only where surfaces should merge. A merged
+cluster draws one larger surface that covers its members and the bridges between them, so
+measure clustered screens against independent surfaces before adopting them. A container also
+shares one optical size, so one large member changes the diffusion of the small members next to
+it.
+
+On a Pixel 8a (Android 17, 60 Hz, fixed-performance mode), in two passes run in opposite orders,
+merging two nearby Regular Glass surfaces into one cluster over a changing source left about 4.6 ms
+less frame deadline margin at P90 and used about 14% more peak GPU memory than drawing them
+independently, with about the same CPU frame duration P90 (4.70 against 4.62 ms). Members resting
+between half and the full merge distance left about 1.4 ms less margin again, and pressing a merged
+member raised CPU frame duration P90 by about 1.5 ms.
+
+A container around a dense scrolling grid cost more. With 40–45 visible members, its CPU frame
+duration P90 was about 7 ms above the same grid of independent members, and neither met the 60 Hz
+deadline ([conditions and limits](benchmark-results.md#glass-containers)).
+
+For styling examples, see the [Glass overview](effects/glass/index.md).
 
 <a id="backdrop-input"></a>
 
 ## Backdrop versus Sources
 
-`HazeInput.Backdrop` lets built-in Blur and Glass consume pixels already drawn behind them in the
-current window. Its native Android path can filter those pixels directly, without marking the
-background with `hazeSource` or capturing a separate source layer.
+[`HazeInput.Backdrop`][HazeInput.Backdrop] lets built-in Blur and Glass use pixels already drawn behind them in the
+current window. On supported Android devices it can filter those pixels directly, without marking
+the background with `hazeSource`.
 
-The current API still takes a `HazeState` or `HazeInput.Sources` for fallback. Keep the
-`hazeSource` setup if you need the effect to work when native rendering is unavailable, including
-on other platforms or after a native failure. Without captured sources, the fallback has no
-background content to process.
+Pass a [`HazeState`][HazeState] or `HazeInput.Sources` to `Backdrop` and keep the `hazeSource` setup if the
+effect must work when native rendering is unavailable, including on other platforms or after a
+native failure. Without captured sources, the fallback has no background content to process.
 
 Use explicit `HazeInput.Sources` when you need to select particular captured content. Native
 Backdrop uses the combined earlier pixels in the same window; it cannot include later drawing
@@ -144,9 +229,9 @@ for examples.
 
 !!! warning "Experimental native Backdrop"
 
-    Native rendering requires a supported, hardware-accelerated Android 37.2 window and is
-    disabled by default. Set `HazeFeatureFlags.isPlatformBackdropEnabled = true` before attaching
-    the effect node to make it eligible. Unsupported configurations use source fallback.
+    Native rendering requires a hardware-accelerated window on Android 17 (full SDK 37.2) or later and
+    is disabled by default. Set `HazeFeatureFlags.isPlatformBackdropEnabled = true` before the
+    effect is first composed to make it eligible. Unsupported configurations use source fallback.
     See [Android window backdrops](core-concepts.md#android-window-backdrops).
 
 Compare native Backdrop with Sources before enabling it for performance reasons. Sources can
@@ -155,13 +240,25 @@ when the effect draws.
 
 !!! note "Measured Backdrop cost"
 
-    On a Pixel 8a at 60 Hz, native Backdrop had **23–46% higher CPU frame P90** than Sources in
-    the tested single-surface Glass workloads. Those figures are based on two passes in opposite
-    orders at `Quality`, with eight iterations per method per pass. Native rendering can simplify source
-    capture, but these tests did not show a CPU performance benefit for Glass.
+    On a Pixel 8a (Android 17, 60 Hz), native Backdrop had **23–46% higher CPU frame P90** than
+    Sources in the tested single-surface Glass workloads. Those figures are based on two passes in
+    opposite orders at `Quality`, with eight iterations per method per pass. Native rendering can
+    simplify setup, but these tests did not show a CPU performance benefit for Glass.
     See the [full Backdrop comparison](benchmark-results.md#native-android-backdrop).
 
 <a id="performance-measurements"></a>
 
 The [benchmark results](benchmark-results.md) contain the complete tables and test conditions.
 Use them as reference points when measuring your own screen.
+
+[GlassStyle.regular]: api/haze-glass/dev.chrisbanes.haze.glass/-glass-style/-companion/regular.html
+[hazeGlass]: api/haze-glass/dev.chrisbanes.haze.glass/haze-glass.html
+[HazeInput.Backdrop]: api/haze/dev.chrisbanes.haze/-haze-input/-backdrop/index.html
+[HazeInput.Sources]: api/haze/dev.chrisbanes.haze/-haze-input/-sources/index.html
+[HazePerformanceMode]: api/haze/dev.chrisbanes.haze/-haze-performance-mode/index.html
+[HazePerformanceMode.Default]: api/haze/dev.chrisbanes.haze/-haze-performance-mode/-companion/-default.html
+[HazeSampling.Default]: api/haze/dev.chrisbanes.haze/-haze-sampling/-companion/-default.html
+[hazeSource]: api/haze/dev.chrisbanes.haze/haze-source.html
+[HazeInputSharing]: api/haze/dev.chrisbanes.haze/-haze-input-sharing/index.html
+[HazeState]: api/haze/dev.chrisbanes.haze/-haze-state/index.html
+[LocalHazePerformanceMode]: api/haze/dev.chrisbanes.haze/-local-haze-performance-mode.html

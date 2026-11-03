@@ -1,8 +1,6 @@
 // Copyright 2026, Christopher Banes and the Haze project contributors
 // SPDX-License-Identifier: Apache-2.0
 
-@file:OptIn(ExperimentalHazeApi::class)
-
 package dev.chrisbanes.haze.sample
 
 import androidx.compose.runtime.Immutable
@@ -13,9 +11,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.lerp
-import dev.chrisbanes.haze.ExperimentalHazeApi
 import dev.chrisbanes.haze.HazePerformanceMode
 import dev.chrisbanes.haze.HazeProgressive
 import dev.chrisbanes.haze.glass.GlassOptics
@@ -45,6 +43,14 @@ internal enum class GlassProfilingScenario(
   val opticsOverride: GlassOptics? = null,
   val fullChroma: Boolean = false,
   val usesBackdrop: Boolean = false,
+  val resizesLayoutBounds: Boolean = false,
+  val memberGap: Dp = 0.dp,
+  val containerMergeDistance: Dp? = null,
+  val scrollsSource: Boolean = false,
+  val scrollsLazyContainer: Boolean = false,
+  val groupKey: String? = null,
+  val pressesMergedMember: Boolean = false,
+  val joinsAndLeaves: Boolean = false,
 ) {
   EffectAttach(
     id = "effect_attach",
@@ -251,6 +257,190 @@ internal enum class GlassProfilingScenario(
     usesBackdrop = true,
   ),
   SourceUpdateNoGlass("source_update_no_glass", glassEnabled = false),
+
+  // The container pair shares its geometry: members join one cluster when their gap is below the
+  // 32 dp merge distance, and the 12 dp gap is below half of it, so the container scenario draws
+  // one two-member Glass cluster with a standalone weight of 0.
+  SourceUpdateIndependent2(
+    id = "source_update_independent_2",
+    effectCount = 2,
+    memberGap = 12.dp,
+  ),
+  SourceUpdateContainer2(
+    id = "source_update_container_2",
+    effectCount = 2,
+    memberGap = 12.dp,
+    containerMergeDistance = 32.dp,
+  ),
+  ResizeQuality(
+    id = "resize_quality",
+    steadyDraw = true,
+    performanceMode = HazePerformanceMode.Quality,
+    resizesLayoutBounds = true,
+  ),
+  ResizeQuality9(
+    id = "resize_quality_9",
+    effectCount = 9,
+    steadyDraw = true,
+    performanceMode = HazePerformanceMode.Quality,
+    resizesLayoutBounds = true,
+  ),
+  ShapeUpdateBalanced(
+    id = "shape_update_balanced",
+    steadyDraw = true,
+    performanceMode = HazePerformanceMode.Balanced,
+    resizesLayoutBounds = true,
+  ),
+  ShapeUpdateBalanced9(
+    id = "shape_update_balanced_9",
+    effectCount = 9,
+    steadyDraw = true,
+    performanceMode = HazePerformanceMode.Balanced,
+    resizesLayoutBounds = true,
+  ),
+  SourceScrollBalanced(
+    id = "source_scroll_balanced",
+    performanceMode = HazePerformanceMode.Balanced,
+    scrollsSource = true,
+  ),
+  SourceScrollBalanced9(
+    id = "source_scroll_balanced_9",
+    effectCount = 9,
+    performanceMode = HazePerformanceMode.Balanced,
+    scrollsSource = true,
+  ),
+
+  // The 12 dp gap is below the 16 dp merge distance, so adjacent members join clusters (at most
+  // four per connected component). That makes this the reclustering cost while the grid scrolls;
+  // LazyIndependentScroll is its like-for-like pair without a container.
+  LazyContainerScroll(
+    id = "lazy_container_scroll",
+    performanceMode = HazePerformanceMode.Balanced,
+    memberGap = 12.dp,
+    containerMergeDistance = 16.dp,
+    scrollsLazyContainer = true,
+  ),
+
+  // The remaining container scenarios use the changing source of SourceUpdateContainer2, except
+  // where noted, so each differs from that control in one variable.
+
+  // A 24 dp resting gap is between half and the full 32 dp merge distance, so the members still
+  // join one cluster but each keeps a standalone weight above 0.
+  ContainerGap2(
+    id = "container_gap_2",
+    effectCount = 2,
+    memberGap = 24.dp,
+    containerMergeDistance = 32.dp,
+  ),
+
+  // Four fixed-size slots in one container; members join and leave on a fixed schedule.
+  ContainerJoinLeave(
+    id = "container_join_leave",
+    effectCount = 4,
+    memberGap = 12.dp,
+    containerMergeDistance = 32.dp,
+    joinsAndLeaves = true,
+  ),
+
+  // Three members share one groupKey 48 dp apart, beyond the 32 dp merge distance.
+  ContainerGroup3(
+    id = "container_group_3",
+    effectCount = 3,
+    memberGap = 48.dp,
+    containerMergeDistance = 32.dp,
+    groupKey = "profiling-group",
+  ),
+
+  // The first member is pressed and released three times; the second has no interaction source.
+  ContainerPress2(
+    id = "container_press_2",
+    effectCount = 2,
+    memberGap = 12.dp,
+    containerMergeDistance = 32.dp,
+    pressesMergedMember = true,
+  ),
+
+  // LazyContainerScroll geometry with independent Glass members instead of a container.
+  LazyIndependentScroll(
+    id = "lazy_independent_scroll",
+    performanceMode = HazePerformanceMode.Balanced,
+    memberGap = 12.dp,
+    scrollsLazyContainer = true,
+  ),
+
+  // Cold initialization of the two-member container, measured like EffectAttach.
+  EffectAttachContainer2(
+    id = "effect_attach_container_2",
+    effectCount = 2,
+    memberGap = 12.dp,
+    containerMergeDistance = 32.dp,
+    attachesDuringMeasurement = true,
+  ),
+}
+
+private val ProfilingJoinLeaveMemberCounts = intArrayOf(2, 3, 4, 3, 2, 3)
+
+/** Members shown by [GlassProfilingScenario.ContainerJoinLeave]: one change every half second. */
+internal fun glassProfilingJoinLeaveMemberCount(progress: Float): Int {
+  require(progress.isFinite() && progress in 0f..1f)
+  val step = (progress * ProfilingJoinLeaveMemberCounts.size).toInt()
+  return ProfilingJoinLeaveMemberCounts[step.coerceAtMost(ProfilingJoinLeaveMemberCounts.lastIndex)]
+}
+
+/** Whether [GlassProfilingScenario.ContainerPress2] holds the first member pressed. */
+internal fun glassProfilingPressed(progress: Float): Boolean {
+  require(progress.isFinite() && progress in 0f..1f)
+  return progress >= 0.10f && progress < 0.25f ||
+    progress >= 0.40f && progress < 0.55f ||
+    progress >= 0.70f && progress < 0.85f
+}
+
+// A fixed box that shows about nine rows of five members each, so 40-45 members are visible.
+internal val ProfilingLazyContainerSize = DpSize(360.dp, 560.dp)
+internal val ProfilingLazyMemberHeight = 56.dp
+internal val ProfilingLazyScrollDistance = 1_200.dp
+internal const val PROFILING_LAZY_COLUMN_COUNT: Int = 5
+internal const val PROFILING_LAZY_ITEM_COUNT: Int = 1_000
+
+internal val ProfilingSurfaceSize = DpSize(280.dp, 180.dp)
+private val ProfilingResizeStartSize = DpSize(196.dp, 126.dp)
+
+// Pill (half of the 126 dp start height) at the small size, rounded panel at the large size.
+private val ProfilingShapeStartRadius = 63.dp
+private val ProfilingShapeEndRadius = 24.dp
+
+// Triangular 0 -> 1 -> 0 phase over three cycles, shared so size and radius cannot drift apart.
+private fun glassProfilingResizeCyclePhase(progress: Float): Float {
+  require(progress.isFinite() && progress in 0f..1f)
+  val cycleProgress = (progress * 6f) % 2f
+  return if (cycleProgress <= 1f) cycleProgress else 2f - cycleProgress
+}
+
+internal fun glassProfilingResizeSize(progress: Float): DpSize {
+  val sizeProgress = glassProfilingResizeCyclePhase(progress)
+  return DpSize(
+    width = lerp(ProfilingResizeStartSize.width.value, ProfilingSurfaceSize.width.value, sizeProgress).dp,
+    height = lerp(ProfilingResizeStartSize.height.value, ProfilingSurfaceSize.height.value, sizeProgress).dp,
+  )
+}
+
+/** Corner radius of one effect cell, moving in phase with [glassProfilingResizeSize]. */
+internal fun glassProfilingShapeCornerRadius(progress: Float, effectCount: Int): Dp {
+  val rowCount = if (effectCount <= 3) 1 else 3
+  return lerp(
+    ProfilingShapeStartRadius.value,
+    ProfilingShapeEndRadius.value,
+    glassProfilingResizeCyclePhase(progress),
+  ).dp / rowCount
+}
+
+internal fun glassProfilingScenarioSize(
+  scenario: GlassProfilingScenario,
+  progress: () -> Float,
+): DpSize = if (scenario.resizesLayoutBounds) {
+  glassProfilingResizeSize(progress())
+} else {
+  ProfilingSurfaceSize
 }
 
 internal enum class GlassProfilingPhase(val id: String) {
@@ -268,6 +458,7 @@ internal data class GlassProfilingFrame(
   val lightPosition: Offset = Offset(0.25f, 0.25f),
   val depth: Float = 1f,
   val blurRadius: Dp = 14.dp,
+  val cornerRadius: Dp? = null,
 )
 
 internal fun glassProfilingFrame(
@@ -282,6 +473,8 @@ internal fun glassProfilingFrame(
     GlassProfilingScenario.EffectAttach9,
     GlassProfilingScenario.EffectReattach,
     GlassProfilingScenario.StableQuality,
+    GlassProfilingScenario.ResizeQuality,
+    GlassProfilingScenario.ResizeQuality9,
     GlassProfilingScenario.BackdropStableQuality,
     GlassProfilingScenario.StableBalanced,
     GlassProfilingScenario.StablePerformance,
@@ -308,6 +501,11 @@ internal fun glassProfilingFrame(
     GlassProfilingScenario.SteadyNoGlass,
     GlassProfilingScenario.InteractionUpdate,
     GlassProfilingScenario.InteractionUpdate9,
+    GlassProfilingScenario.SourceScrollBalanced,
+    GlassProfilingScenario.SourceScrollBalanced9,
+    GlassProfilingScenario.LazyContainerScroll,
+    GlassProfilingScenario.LazyIndependentScroll,
+    GlassProfilingScenario.EffectAttachContainer2,
     -> base
     GlassProfilingScenario.RetainedReuse -> base.copy(
       markerOffset = lerp(-0.4f, 0.4f, progress),
@@ -320,6 +518,11 @@ internal fun glassProfilingFrame(
     )
     GlassProfilingScenario.BlurUpdate -> base.copy(
       blurRadius = lerp(4f, 28f, progress).dp,
+    )
+    GlassProfilingScenario.ShapeUpdateBalanced,
+    GlassProfilingScenario.ShapeUpdateBalanced9,
+    -> base.copy(
+      cornerRadius = glassProfilingShapeCornerRadius(progress, scenario.effectCount),
     )
     GlassProfilingScenario.SourceUpdateQuality,
     GlassProfilingScenario.BackdropSourceUpdateQuality,
@@ -334,6 +537,12 @@ internal fun glassProfilingFrame(
     GlassProfilingScenario.SourceUpdate9,
     GlassProfilingScenario.BackdropSourceUpdate9,
     GlassProfilingScenario.SourceUpdateNoGlass,
+    GlassProfilingScenario.SourceUpdateIndependent2,
+    GlassProfilingScenario.SourceUpdateContainer2,
+    GlassProfilingScenario.ContainerGap2,
+    GlassProfilingScenario.ContainerJoinLeave,
+    GlassProfilingScenario.ContainerGroup3,
+    GlassProfilingScenario.ContainerPress2,
     -> base.copy(sourceOffset = lerp(-0.08f, 0.08f, progress))
   }
 }
@@ -355,6 +564,12 @@ internal inline fun glassProfilingSourceProgress(
   GlassProfilingScenario.SourceUpdate9,
   GlassProfilingScenario.BackdropSourceUpdate9,
   GlassProfilingScenario.SourceUpdateNoGlass,
+  GlassProfilingScenario.SourceUpdateIndependent2,
+  GlassProfilingScenario.SourceUpdateContainer2,
+  GlassProfilingScenario.ContainerGap2,
+  GlassProfilingScenario.ContainerJoinLeave,
+  GlassProfilingScenario.ContainerGroup3,
+  GlassProfilingScenario.ContainerPress2,
   -> progress()
   else -> 0f
 }

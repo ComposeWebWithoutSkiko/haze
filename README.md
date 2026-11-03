@@ -12,7 +12,7 @@ https://github.com/user-attachments/assets/836dd79a-abdc-4cdc-b27d-baee394c1e26
 
 Haze provides hardware-accelerated visual effects for Compose Multiplatform — Android, iOS, macOS, Desktop, and Web. Its modular Haze 2 API lets you apply source-backed or own-content Blur, refraction-driven Glass, and custom effects with explicit, reusable configuration.
 
-Haze 2.0 is currently in beta. If you are upgrading from Haze 1.x or an earlier Haze 2 prerelease, see the [Haze 2 migration guide](https://chrisbanes.github.io/haze/migrating-2.0/).
+If you are upgrading from Haze 1.x, see the [Haze 2 migration guide](https://chrisbanes.github.io/haze/migrating-2.0/).
 
 ## Platforms
 
@@ -34,7 +34,7 @@ Add the core module and only the effect modules you use. Keep every Haze artifac
 | `haze-blur` | Blur for captured sources or a modifier's own content. |
 | `haze-blur-materials` | Optional ready-made Blur Styles, including `HazeMaterials.thin()`. |
 | `haze-blur-material3` | Optional Compose Material 3 Blur Style factory. |
-| `haze-glass` | Experimental, refraction-driven Glass effect. |
+| `haze-glass` | Refraction-driven Glass effect. |
 | `haze-glass-material3` | Optional Compose Material 3 Glass Style factory. |
 
 ## Download
@@ -50,7 +50,7 @@ dependencies {
 }
 ```
 
-For Glass, add the core module and the experimental Glass artifact:
+For Glass, add the core module and the Glass artifact:
 
 ```kotlin
 dependencies {
@@ -63,6 +63,7 @@ dependencies {
 
 ```kotlin
 val hazeState = rememberHazeState()
+val style = remember { HazeBlurStyle { blurRadius(20.dp) } }
 
 Box {
     Image(
@@ -75,19 +76,19 @@ Box {
             .matchParentSize()
             .hazeBlur(
                 input = HazeInput.Sources(hazeState),
-                style = HazeBlurStyle { blurRadius(20.dp) },
+                style = style,
             ),
     )
 }
 ```
 
-`HazeInput.Sources` renders captured `hazeSource` content. Use `HazeInput.Content` to blur the modifier's own content instead. `HazeBlurStyle` is immutable and reusable; use `then` to derive a variation or supply a replacement Style when its appearance changes.
+`HazeInput.Sources` renders captured `hazeSource` content. Use `HazeInput.Content` to blur the modifier's own content instead. Share a `HazeBlurStyle` between modifiers and use `then` to derive variations. Snapshot state read inside a remembered Style block updates each node without recomposition; supply a replacement Style to change the selected Style.
 
 The optional [Blur material presets](https://chrisbanes.github.io/haze/blur/materials/) provide `HazeMaterials.ultraThin()`, `thin()`, `regular()`, `thick()`, and `ultraThick()`. The [`haze-blur-material3` integration](https://chrisbanes.github.io/haze/blur/material3/) provides `HazeBlurStyle.Material3()` for a Style based on the current Material 3 surface.
 
 ## Glass
 
-`haze-glass` is an experimental Haze 2 module for material-like Glass: refraction, depth Blur, tint, lighting, highlights, rounded shapes, and optional pointer, focus, and press responses. Glass APIs require `@ExperimentalHazeApi`.
+`haze-glass` is a Haze 2 module for material-like Glass: refraction, depth Blur, tint, lighting, highlights, rounded shapes, and optional pointer, focus, and press responses.
 
 ```kotlin
 Modifier.hazeGlass(
@@ -102,7 +103,7 @@ Modifier.hazeGlass(
 Start with `GlassStyle.regular`, or use `GlassStyle.clear` when the background should remain more
 visible. Consult the [Glass guide](https://chrisbanes.github.io/haze/effects/glass/) for custom
 optics, interaction, retention, and platform fallback behavior. Add `haze-glass-material3` to use
-`GlassStyle.Material3()` or `material3()` with your current Material 3 surface color. Regular and
+`material3()` with your current Material 3 surface color. Regular and
 Clear follow the system appearance without Material 3. The optional integration supplies the app
 theme's surface color and can add a tint.
 

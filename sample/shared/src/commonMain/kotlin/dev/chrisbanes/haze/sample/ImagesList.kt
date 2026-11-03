@@ -21,6 +21,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.key
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -29,7 +30,6 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavHostController
 import coil3.compose.AsyncImage
-import dev.chrisbanes.haze.ExperimentalHazeApi
 import dev.chrisbanes.haze.HazeInput
 import dev.chrisbanes.haze.blur.hazeBlur
 import dev.chrisbanes.haze.blur.materials.HazeMaterials
@@ -38,7 +38,7 @@ import dev.chrisbanes.haze.glass.hazeGlass
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalHazeApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ImagesList(navController: NavHostController, effect: SampleEffect) {
   val navigationEnabled = LocalSampleNavigationEnabled.current
@@ -108,10 +108,12 @@ fun ImagesList(navController: NavHostController, effect: SampleEffect) {
                         Modifier
                           .hazeGlass(
                             input = HazeInput.Backdrop(hazeState),
-                            style = GlassStyle.regular.then {
-                              backgroundColor(glassBackgroundColor)
-                              tint(glassTint)
-                              shape(shape)
+                            style = remember(glassBackgroundColor, glassTint, shape) {
+                              GlassStyle.regular.then {
+                                backgroundColor(glassBackgroundColor)
+                                tint(glassTint)
+                                shape(shape)
+                              }
                             },
                           )
                           .clip(shape)

@@ -5,10 +5,12 @@ package dev.chrisbanes.haze.glass
 
 import androidx.compose.runtime.Immutable
 import androidx.compose.ui.unit.Dp
-import dev.chrisbanes.haze.ExperimentalHazeApi
 
-/** Controls how refraction displaces content independently of the material's lighting. */
-@ExperimentalHazeApi
+/**
+ * Controls how refraction displaces content independently of the material's lighting.
+ *
+ * Future minor releases may add subtypes. Keep an `else` branch when you match exhaustively with `when`.
+ */
 @Immutable
 public sealed interface RefractionProfile {
   /** Uses [SurfaceProfile] and [GlassOptics.refractionHeightFraction] for refraction and lighting. */
@@ -20,6 +22,10 @@ public sealed interface RefractionProfile {
    * Rounded corners use an optical radius 1.5 times the visible radius, capped at half the material's
    * shortest side. Displacement is also capped at half that side. [SurfaceProfile] and
    * [GlassOptics.refractionHeightFraction] continue to control lighting, independently of refraction.
+   *
+   * In a merged cluster, a member's standalone weight falls below 1 once a neighbour is inside the
+   * container's merge distance. The rest of its response takes the Edge direction from the merged
+   * shape at its visible radius, not 1.5 times it, and blends the members' displacement caps.
    *
    * [width] must be specified, finite, and non-negative. A zero width disables refraction, including
    * its secondary detail pass. Simplified renderers may omit refraction entirely.

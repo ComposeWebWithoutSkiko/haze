@@ -10,6 +10,9 @@ import androidx.compose.ui.graphics.asComposeShader
 import org.jetbrains.skia.ColorFilter
 import org.jetbrains.skia.Shader
 
+/**
+ * Creates a fractal noise shader.
+ */
 @InternalHazeApi
 public actual fun createFractalNoiseShader(
   baseFrequencyX: Float,

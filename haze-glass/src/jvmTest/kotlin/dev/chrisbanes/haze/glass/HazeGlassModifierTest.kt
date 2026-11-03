@@ -11,14 +11,19 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.center
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.PointerEvent
 import androidx.compose.ui.platform.LocalLayoutDirection
@@ -27,6 +32,8 @@ import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.v2.runComposeUiTest
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import assertk.assertThat
@@ -64,6 +71,7 @@ import dev.chrisbanes.haze.RuntimeShaderRenderEffectException
 import dev.chrisbanes.haze.TrimMemoryLevel
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.test.ContextTest
+import dev.chrisbanes.haze.test.RecompositionCounter
 import kotlin.test.Test
 
 @OptIn(ExperimentalHazeApi::class, ExperimentalTestApi::class)
@@ -493,9 +501,9 @@ class HazeGlassModifierTest : ContextTest() {
   }
 
   @Test
-  fun capturedStateMutation_requiresReplacementStyleToUpdateSharedNodes() = runComposeUiTest {
+  fun stateReadInStyle_updatesSharedNodesWithoutReplacement() = runComposeUiTest {
     val alpha = mutableFloatStateOf(0.2f)
-    val sharedStyle = mutableStateOf(GlassStyle { alpha(alpha.floatValue) })
+    val sharedStyle = GlassStyle { alpha(alpha.floatValue) }
     val factory = RecordingGlassFactory()
 
     setContent {
@@ -507,7 +515,7 @@ class HazeGlassModifierTest : ContextTest() {
               .hazeGlass(
                 factory = factory,
                 input = HazeInput.Content,
-                style = sharedStyle.value,
+                style = sharedStyle,
                 performanceMode = HazePerformanceMode.Default,
                 expandLayerBounds = true,
                 interactionSource = null,
@@ -528,23 +536,353 @@ class HazeGlassModifierTest : ContextTest() {
     waitForIdle()
 
     assertThat(factory.effects.size).isEqualTo(2)
-    assertThat(firstRuntime.alpha).isEqualTo(0.2f)
-    assertThat(secondRuntime.alpha).isEqualTo(0.2f)
-
-    sharedStyle.value = GlassStyle { alpha(alpha.floatValue) }
-    waitForIdle()
-
-    assertThat(factory.effects.size).isEqualTo(2)
     assertThat(firstRuntime.alpha).isEqualTo(0.8f)
     assertThat(secondRuntime.alpha).isEqualTo(0.8f)
   }
+
+  @Test
+  fun rememberedStyleStateReads_updateRenderWithoutRecomposition() = runComposeUiTest {
+    val radius = mutableStateOf(8.dp)
+    val blur = mutableStateOf(4.dp)
+    val fade = mutableFloatStateOf(0.4f)
+    val recompositions = mutableIntStateOf(0)
+    val factory = RecordingGlassFactory()
+
+    setContent {
+      RecompositionCounter(recompositions) {
+        Spacer(
+          Modifier
+            .size(100.dp)
+            .hazeGlass(
+              factory = factory,
+              input = HazeInput.Content,
+              style = remember {
+                GlassStyle {
+                  shape(RoundedCornerShape(radius.value))
+                  alpha(fade.floatValue)
+                  optics { copy(blurRadius = OpticalSizeValue.Fixed(blur.value)) }
+                }
+              },
+              performanceMode = HazePerformanceMode.Default,
+              expandLayerBounds = true,
+              interactionSource = null,
+            ),
+        )
+      }
+    }
+    waitForIdle()
+    recompositions.intValue = 0
+
+    blur.value = 8.dp
+    radius.value = 24.dp
+    fade.floatValue = 0.7f
+    waitForIdle()
+    onRoot().captureToImage()
+
+    val runtime = factory.effects.single().delegate
+    val expectedRadius = with(density) { 24.dp.toPx() }
+    assertThat(recompositions.intValue).isEqualTo(0)
+    assertThat(runtime.optics.blurRadius).isEqualTo(OpticalSizeValue.Fixed(8.dp))
+    assertThat(runtime.alpha).isEqualTo(0.7f)
+    val prepared = checkNotNull(runtime.preparedRender)
+    assertThat(prepared.alpha).isEqualTo(0.7f)
+    assertThat(prepared.params.cornerRadii).isEqualTo(uniformRadii(expectedRadius, prepared))
+
+    // An optics-only state change must invalidate the observed style too.
+    blur.value = 12.dp
+    waitForIdle()
+    onRoot().captureToImage()
+    assertThat(recompositions.intValue).isEqualTo(0)
+    assertThat(runtime.optics.blurRadius).isEqualTo(OpticalSizeValue.Fixed(12.dp))
+    val updated = checkNotNull(runtime.preparedRender)
+    assertThat(updated.params.blurRadiusPx)
+      .isEqualTo(with(density) { 12.dp.toPx() } * updated.params.coordinates.scaleFactor)
+  }
+
+  @Test
+  fun styleStateChange_isRenderedOnNextFrame() = runComposeUiTest {
+    val radius = mutableStateOf(8.dp)
+    val factory = RecordingGlassFactory()
+
+    setContent {
+      Spacer(
+        Modifier
+          .size(100.dp)
+          .hazeGlass(
+            factory = factory,
+            input = HazeInput.Content,
+            style = remember { GlassStyle { shape(RoundedCornerShape(radius.value)) } },
+            performanceMode = HazePerformanceMode.Default,
+            expandLayerBounds = true,
+            interactionSource = null,
+          ),
+      )
+    }
+    waitForIdle()
+    mainClock.autoAdvance = false
+
+    radius.value = 16.dp
+    mainClock.advanceTimeByFrame()
+
+    val expectedRadius = with(density) { 16.dp.toPx() }
+    val prepared = checkNotNull(factory.effects.single().delegate.preparedRender)
+    assertThat(prepared.params.cornerRadii).isEqualTo(uniformRadii(expectedRadius, prepared))
+  }
+
+  @Test
+  fun sourceScroll_updatesGeometryWithoutRendererUpdate() = runComposeUiTest {
+    val hazeState = HazeState()
+    val sourceY = mutableIntStateOf(0)
+    val factory = RecordingGlassFactory()
+    setContent {
+      Box(Modifier.size(200.dp)) {
+        Box(Modifier.offset { IntOffset(0, sourceY.intValue) }.size(200.dp).hazeSource(hazeState))
+        Spacer(
+          Modifier
+            .size(100.dp)
+            .hazeGlass(
+              factory = factory,
+              input = HazeInput.Sources(hazeState),
+              style = GlassStyle,
+              performanceMode = HazePerformanceMode.Default,
+              expandLayerBounds = true,
+              interactionSource = null,
+            ),
+        )
+      }
+    }
+    waitForIdle()
+    mainClock.autoAdvance = false
+    val effect = factory.effects.single()
+    effect.updateCalls = 0
+    val draws = effect.drawCalls
+
+    repeat(3) { frame ->
+      sourceY.intValue = 10 * (frame + 1)
+      mainClock.advanceTimeByFrame()
+    }
+
+    // Glass re-resolves its style only for configuration or effect-size changes (ADR-0011).
+    assertThat(effect.updateCalls).isEqualTo(0)
+    assertThat(effect.drawCalls).isGreaterThan(draws)
+  }
+
+  @Test
+  fun observedStyleChange_addsOneRendererUpdatePerFrame() = runComposeUiTest {
+    val radius = mutableStateOf(8.dp)
+    val side = mutableStateOf(100.dp)
+    val factory = RecordingGlassFactory()
+
+    setContent {
+      Spacer(
+        Modifier
+          .size(side.value)
+          .hazeGlass(
+            factory = factory,
+            input = HazeInput.Content,
+            style = remember { GlassStyle { shape(RoundedCornerShape(radius.value)) } },
+            performanceMode = HazePerformanceMode.Default,
+            expandLayerBounds = true,
+            interactionSource = null,
+          ),
+      )
+    }
+    waitForIdle()
+    mainClock.autoAdvance = false
+    val effect = factory.effects.single()
+
+    fun assertPreparedRadius(effect: RecordingGlassRuntimeEffect, radius: Dp) {
+      val prepared = checkNotNull(effect.delegate.preparedRender)
+      val radiusPx = with(density) { radius.toPx() }
+      assertThat(prepared.params.cornerRadii).isEqualTo(uniformRadii(radiusPx, prepared))
+    }
+
+    fun updatesInFrame(change: () -> Unit): Int {
+      effect.updateCalls = 0
+      change()
+      mainClock.advanceTimeByFrame()
+      return effect.updateCalls
+    }
+
+    val sizeOnly = updatesInFrame { side.value = 120.dp }
+    val styleOnly = updatesInFrame { radius.value = 16.dp }
+    assertPreparedRadius(effect, 16.dp)
+    val styleAndSize = updatesInFrame {
+      radius.value = 24.dp
+      side.value = 140.dp
+    }
+
+    // A size change re-resolves the size-responsive style once (ADR-0011, #1456).
+    assertThat(sizeOnly).isEqualTo(1)
+    assertThat(styleOnly).isEqualTo(1)
+    assertThat(styleAndSize).isEqualTo(sizeOnly + 1)
+    assertPreparedRadius(effect, 24.dp)
+  }
+
+  @Test
+  fun observedInteractionResponseChange_addsOneRendererUpdatePerFrame() = runComposeUiTest {
+    val intensity = mutableStateOf(0.2f)
+    val factory = RecordingGlassFactory()
+
+    setContent {
+      Spacer(
+        Modifier
+          .size(100.dp)
+          .hazeGlass(
+            factory = factory,
+            input = HazeInput.Content,
+            style = remember { GlassStyle { pressed { lightingIntensity(intensity.value) } } },
+            performanceMode = HazePerformanceMode.Default,
+            expandLayerBounds = true,
+            interactionSource = null,
+          ),
+      )
+    }
+    waitForIdle()
+    mainClock.autoAdvance = false
+    val effect = factory.effects.single()
+
+    fun updatesInFrame(change: () -> Unit): Int {
+      effect.updateCalls = 0
+      change()
+      mainClock.advanceTimeByFrame()
+      return effect.updateCalls
+    }
+
+    fun assertDelivered(value: Float) {
+      val controller = checkNotNull(effect.delegate.interactionControllerForTest)
+      assertThat(controller.configurationForTest.slots.pressed?.response?.lightingIntensity?.value)
+        .isEqualTo(value)
+      assertThat(effect.delegate.interactionSlots.pressed?.response?.lightingIntensity?.value)
+        .isEqualTo(value)
+    }
+
+    val first = updatesInFrame { intensity.value = 0.5f }
+    assertDelivered(0.5f)
+    val second = updatesInFrame { intensity.value = 0.8f }
+    assertDelivered(0.8f)
+
+    assertThat(first).isEqualTo(1)
+    assertThat(second).isEqualTo(1)
+  }
+
+  @Test
+  fun interactionTransformTargetAndPivotChange_redrawsWithNewTransforms() = runComposeUiTest {
+    val target = mutableStateOf(GlassTransformTarget.MaterialOnly)
+    val pivot = mutableStateOf(GlassTransformPivot.Pointer)
+    val factory = RecordingGlassFactory()
+
+    setContent {
+      Spacer(
+        Modifier
+          .size(100.dp)
+          .hazeGlass(
+            factory = factory,
+            input = HazeInput.Content,
+            style = remember { GlassStyle { pressed { scale(0.9f) } } },
+            performanceMode = HazePerformanceMode.Default,
+            expandLayerBounds = true,
+            interactionSource = null,
+            interactionTransformTarget = target.value,
+            interactionTransformPivot = pivot.value,
+            interactionReducedMotionPolicy = GlassReducedMotionPolicy.Full,
+          ),
+      )
+    }
+    waitForIdle()
+    val effect = factory.effects.single()
+    val runtime = effect.delegate
+    val size = checkNotNull(runtime.attachedContextForTest).modifierSize
+    val pointer = Offset(20f, 30f)
+
+    runOnIdle { runtime.setPressedForTest(pointer) }
+    waitForIdle()
+    assertThat(runtime.currentMaterialTransform(size))
+      .isEqualTo(HazeEffectContentTransform(0.9f, 0.9f, pointer))
+    assertThat(runtime.currentContentTransform()).isEqualTo(HazeEffectContentTransform.Identity)
+
+    var draws = effect.drawCalls
+    target.value = GlassTransformTarget.MaterialAndContent
+    waitForIdle()
+    assertThat(effect.drawCalls).isGreaterThan(draws)
+    assertThat(runtime.currentContentTransform())
+      .isEqualTo(HazeEffectContentTransform(0.9f, 0.9f, pointer))
+    assertThat(runtime.currentInteractionTransform(size))
+      .isEqualTo(HazeEffectContentTransform(0.9f, 0.9f, pointer))
+    assertThat(runtime.currentMaterialTransform(size)).isEqualTo(HazeEffectContentTransform.Identity)
+
+    draws = effect.drawCalls
+    pivot.value = GlassTransformPivot.Center
+    waitForIdle()
+    assertThat(effect.drawCalls).isGreaterThan(draws)
+    assertThat(runtime.currentContentTransform())
+      .isEqualTo(HazeEffectContentTransform(0.9f, 0.9f, size.center))
+    assertThat(runtime.currentInteractionTransform(size))
+      .isEqualTo(HazeEffectContentTransform(0.9f, 0.9f, size.center))
+  }
+
+  @Test
+  fun interactionConfigurationChange_costsNoMoreUpdatesThanOtherModifierChanges() = runComposeUiTest {
+    val performanceMode = mutableStateOf(HazePerformanceMode.Default)
+    val source = mutableStateOf<InteractionSource?>(null)
+    val target = mutableStateOf(GlassTransformTarget.MaterialOnly)
+    val pivot = mutableStateOf(GlassTransformPivot.Pointer)
+    val policy = mutableStateOf(GlassReducedMotionPolicy.System)
+    val factory = RecordingGlassFactory()
+
+    setContent {
+      Spacer(
+        Modifier
+          .size(100.dp)
+          .hazeGlass(
+            factory = factory,
+            input = HazeInput.Content,
+            style = remember { GlassStyle { pressed { scale(0.9f) } } },
+            performanceMode = performanceMode.value,
+            expandLayerBounds = true,
+            interactionSource = source.value,
+            interactionTransformTarget = target.value,
+            interactionTransformPivot = pivot.value,
+            interactionReducedMotionPolicy = policy.value,
+          ),
+      )
+    }
+    waitForIdle()
+    mainClock.autoAdvance = false
+    val effect = factory.effects.single()
+
+    fun updatesInFrame(change: () -> Unit): Int {
+      effect.updateCalls = 0
+      change()
+      mainClock.advanceTimeByFrame()
+      return effect.updateCalls
+    }
+
+    // The core node adds an update of its own to every modifier change; Glass must add none.
+    val control = updatesInFrame { performanceMode.value = HazePerformanceMode.Quality }
+    val interactionUpdates = listOf(
+      updatesInFrame { source.value = MutableInteractionSource() },
+      updatesInFrame { target.value = GlassTransformTarget.MaterialAndContent },
+      updatesInFrame { pivot.value = GlassTransformPivot.Center },
+      updatesInFrame { policy.value = GlassReducedMotionPolicy.Full },
+    )
+    val idle = updatesInFrame { }
+
+    assertThat(control).isGreaterThan(0)
+    assertThat(interactionUpdates).isEqualTo(List(4) { control })
+    assertThat(idle).isEqualTo(0)
+  }
+
+  /** Prepared radii are in the render's input-scaled coordinates. */
+  private fun uniformRadii(radiusPx: Float, prepared: GlassPreparedRender): CornerRadii =
+    CornerRadii(radiusPx, radiusPx, radiusPx, radiusPx) * prepared.params.coordinates.scaleFactor
 
   @Test
   fun stylePrecedence_reachesRuntimeWithAtomicCompoundWrites() = runComposeUiTest {
     val localStyle = GlassStyle {
       alpha(0.3f)
       whitePoint(0.2f)
-      optics(depth = 0.2f, blurRadius = 12.dp)
+      optics(GlassOptics(depth = OpticalSizeValue.Fixed(0.2f), blurRadius = OpticalSizeValue.Fixed(12.dp)))
       pressed {
         lightingIntensity(0.2f)
         refractionMultiplier(1.2f)
@@ -553,19 +891,19 @@ class HazeGlassModifierTest : ContextTest() {
     val explicitStyle = GlassStyle {
       alpha(0.6f)
       specularIntensity(0.6f)
-      optics(GlassDefaults.optics)
+      optics(GlassOptics.regular)
       pressed {
         lightingIntensity(0.5f)
         refractionMultiplier(1.5f)
       }
     }.then {
       alpha(0.8f)
-      optics(depth = 0.7f)
+      optics(GlassOptics(depth = OpticalSizeValue.Fixed(0.7f)))
       pressed { lightingIntensity(0.9f) }
     }
     val completeFinalOptics = GlassOptics(refractionStrength = 0.4f)
     val completeFinalStyle = explicitStyle.then { optics(completeFinalOptics) }
-    val directFinalStyle = completeFinalStyle.then { optics(depth = 0.9f) }
+    val directFinalStyle = completeFinalStyle.then { optics(GlassOptics(depth = OpticalSizeValue.Fixed(0.9f))) }
     val factory = RecordingGlassFactory { effect ->
       effect.appearanceReader = { GlassSystemAppearance.Light }
     }
@@ -735,7 +1073,7 @@ class HazeGlassModifierTest : ContextTest() {
     assertThat(effect.delegate.interactionLightRadiusFraction)
       .isEqualTo(GlassDefaults.interactionLightRadiusFraction)
     assertThat(effect.delegate.interactionPositionAnimationSpec)
-      .isEqualTo(GlassDefaults.positionAnimationSpec)
+      .isEqualTo(GlassDefaults.interactionPositionAnimationSpec)
   }
 
   @Test
@@ -864,10 +1202,13 @@ private class RecordingGlassRuntimeEffect(
     get() = delegate.performanceModeForTest
 
   var calculateLayerBoundsCalls = 0
+  var updateCalls = 0
+  var drawCalls = 0
   var clearRetainedOutputCalls = 0
   var retainedDrawDecisions = 0
 
   override fun HazeEffectDrawScope.draw(style: GlassNodeConfiguration) {
+    drawCalls++
     with(delegate) { draw(style) }
   }
 
@@ -887,6 +1228,7 @@ private class RecordingGlassRuntimeEffect(
     style: GlassNodeConfiguration,
     sampling: HazeSampling,
   ) {
+    updateCalls++
     delegate.update(scope, style, sampling)
   }
 

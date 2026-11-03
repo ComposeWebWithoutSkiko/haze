@@ -61,7 +61,6 @@ import androidx.navigation.compose.rememberNavController
 import coil3.SingletonImageLoader
 import coil3.compose.LocalPlatformContext
 import coil3.request.ImageRequest
-import dev.chrisbanes.haze.ExperimentalHazeApi
 import dev.chrisbanes.haze.LocalHazePerformanceMode
 import dev.chrisbanes.haze.blur.HazeBlurStyle
 import dev.chrisbanes.haze.blur.LocalHazeBlurStyle
@@ -85,7 +84,6 @@ internal fun List<Sample>.forEffect(effect: SampleEffect): List<Sample> = filter
   effect in it.effects
 }
 
-@OptIn(ExperimentalHazeApi::class)
 val CommonSamples: List<Sample> = listOf(
   Sample.Scaffold,
   Sample.ScaffoldProgressive,
@@ -104,9 +102,11 @@ val CommonSamples: List<Sample> = listOf(
   Sample.GlassProduct,
   Sample.GlassPlayground,
   Sample.GlassMusicPlayer,
+  Sample.GlassShapeMorph,
+  Sample.GlassContainer,
+  Sample.GlassContainerShowcase,
 )
 
-@OptIn(ExperimentalHazeApi::class)
 class Sample(
   val route: String,
   val title: String,
@@ -265,6 +265,30 @@ class Sample(
     ) { navController, _ ->
       GlassMusicPlayerSample(navController = navController)
     }
+
+    val GlassShapeMorph = Sample(
+      route = "glass-shape-morph",
+      title = "Glass — Shape Morph",
+      effects = listOf(SampleEffect.Glass),
+    ) { navController, _ ->
+      GlassShapeMorphSample(navController = navController)
+    }
+
+    val GlassContainer = Sample(
+      route = "glass-container",
+      title = "Glass — Container",
+      effects = listOf(SampleEffect.Glass),
+    ) { navController, _ ->
+      GlassContainerSample(navController = navController)
+    }
+
+    val GlassContainerShowcase = Sample(
+      route = "glass-container-showcase",
+      title = "Glass — Container Showcase",
+      effects = listOf(SampleEffect.Glass),
+    ) { navController, _ ->
+      GlassContainerShowcaseSample(navController = navController)
+    }
   }
 }
 
@@ -292,7 +316,7 @@ fun Samples(
   val coilPlatformContext = LocalPlatformContext.current
   val inspectionMode = LocalInspectionMode.current
   LaunchedEffect(coilPlatformContext, inspectionMode) {
-    if (!inspectionMode) {
+    if (!inspectionMode && initialSelection?.sample?.route?.endsWith("-profiling") != true) {
       // Preload the first 20 precanned image urls
       val imageLoader = SingletonImageLoader.get(coilPlatformContext)
       precannedImageUrls
@@ -315,7 +339,8 @@ fun Samples(
   val currentDestination by navController.currentBackStackEntryAsState()
   val currentRoute = currentDestination?.destination?.route
   val profilingRoute = currentRoute?.startsWith("blur-profiling/") == true ||
-    currentRoute?.startsWith("glass-profiling/") == true
+    currentRoute?.startsWith("glass-profiling/") == true ||
+    currentRoute?.startsWith("glass-feed-profiling/") == true
   LaunchedEffect(settings.performanceMode, currentRoute) {
     metrics.clear()
   }

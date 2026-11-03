@@ -5,22 +5,26 @@
 
 package dev.chrisbanes.haze.glass
 
-import android.graphics.BlendMode
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
-import android.graphics.RenderEffect
 import android.graphics.RuntimeShader
 import android.os.Build
 import androidx.annotation.RequiresApi
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shader
 import androidx.compose.ui.graphics.ShaderBrush
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.nativeCanvas
-import androidx.compose.ui.graphics.toAndroidColorSpace
 import dev.chrisbanes.haze.InternalHazeApi
 import dev.chrisbanes.haze.PlatformRenderEffect
 import dev.chrisbanes.haze.RuntimeShaderUniformProvider
+import dev.chrisbanes.haze.createBlendRenderEffect
+import dev.chrisbanes.haze.createColorFilterRenderEffect
+import dev.chrisbanes.haze.toAndroidColorLong
+import dev.chrisbanes.haze.wrapRuntimeShaderConstruction
 
 @RequiresApi(Build.VERSION_CODES.S)
 internal actual fun createGlassDepthInputRenderEffect(
@@ -31,26 +35,21 @@ internal actual fun createGlassDepthInputRenderEffect(
   if (blur == null || depth <= 0.0001f) return null
   if (depth >= 0.9999f) return blur
 
-  return wrapGlassRuntimeEffectConstruction {
-    fun scaledInput(scale: Float, input: RenderEffect? = null): RenderEffect {
+  return wrapRuntimeShaderConstruction {
+    fun scaledInput(scale: Float, input: PlatformRenderEffect?): PlatformRenderEffect {
       val matrix = ColorMatrix().apply {
         // Color filters operate on straight RGB and premultiply the result. Scaling both RGB and
         // alpha would therefore apply the factor twice to premultiplied color. Scale alpha only to
         // match Canvas layer alpha, which scales premultiplied RGBA once.
         setScale(1f, 1f, 1f, scale)
       }
-      val filter = ColorMatrixColorFilter(matrix)
-      return if (input != null) {
-        RenderEffect.createColorFilterEffect(filter, input)
-      } else {
-        RenderEffect.createColorFilterEffect(filter)
-      }
+      return createColorFilterRenderEffect(ColorMatrixColorFilter(matrix), input)
     }
 
-    RenderEffect.createBlendModeEffect(
-      scaledInput(1f - depth, sharp),
-      scaledInput(depth, blur),
-      BlendMode.PLUS,
+    createBlendRenderEffect(
+      blendMode = BlendMode.Plus,
+      background = scaledInput(1f - depth, sharp),
+      foreground = scaledInput(depth, blur),
     )
   }
 }
@@ -61,30 +60,58 @@ internal actual fun DrawScope.supportsGlassRimBrush(): Boolean =
   drawContext.canvas.nativeCanvas.isHardwareAccelerated
 
 @RequiresApi(Build.VERSION_CODES.TIRAMISU)
-internal actual fun createGlassRimBrushProvider(): GlassRimBrushProvider? {
-  val shader = runCatchingGlassRim { RuntimeShader(GlassShaders.buildRim()) }.getOrNull() ?: return null
-  val brush = ShaderBrush(shader)
-  val uniforms = GlassRimUniformProvider(shader)
-  return GlassRimBrushProvider { key ->
+internal actual fun createGlassRimBrushProvider(merged: Boolean): GlassRimBrushProvider? =
+  (if (merged) GlassDirectDrawPrograms.mergedRim else GlassDirectDrawPrograms.rim)
+    ?.let { AndroidGlassRimBrushProvider(it.shader, it.brush) }
+
+@RequiresApi(Build.VERSION_CODES.TIRAMISU)
+internal class AndroidGlassRimBrushProvider(
+  internal val shader: RuntimeShader,
+  private val brush: Brush,
+) : GlassRimBrushProvider {
+  private val uniforms = GlassRimUniformProvider(shader)
+
+  override fun invoke(key: GlassRimEffectKey): Brush {
     uniforms.setRimUniforms(key)
-    brush
+    return brush
   }
 }
 
 @RequiresApi(Build.VERSION_CODES.TIRAMISU)
-private class GlassRimUniformProvider(private val shader: RuntimeShader) : RuntimeShaderUniformProvider {
-  override fun setColorUniform(name: String, color: Color) {
-    shader.setColorUniform(
-      name,
-      android.graphics.Color.valueOf(
-        color.red,
-        color.green,
-        color.blue,
-        color.alpha,
-        color.colorSpace.toAndroidColorSpace(),
-      ),
-    )
+internal actual fun createGlassMergedBackgroundShaderProvider(): GlassMergedBackgroundShaderProvider? =
+  GlassDirectDrawPrograms.mergedBackground?.let(::AndroidGlassMergedBackgroundShaderProvider)
+
+@RequiresApi(Build.VERSION_CODES.TIRAMISU)
+internal class AndroidGlassMergedBackgroundShaderProvider(
+  internal val shader: RuntimeShader,
+) : GlassMergedBackgroundShaderProvider {
+  private val uniforms = GlassRimUniformProvider(shader)
+
+  override fun invoke(materialOrigin: Offset, field: GlassMergedField): Shader {
+    uniforms.setFloatUniform("materialOrigin", materialOrigin.x, materialOrigin.y)
+    uniforms.setMergedFieldUniforms(field, includeBackground = true)
+    return shader
   }
+}
+
+@RequiresApi(Build.VERSION_CODES.TIRAMISU)
+private class GlassRimProgram(val shader: RuntimeShader) {
+  val brush = ShaderBrush(shader)
+}
+
+// One compiled program per variant, shared by every provider. That is safe only because each
+// provider is invoked inside the recorded draw that uses its result, which snapshots the uniforms,
+// or passed straight to RenderEffect.createShaderEffect. Never invoke one outside such a call.
+@RequiresApi(Build.VERSION_CODES.TIRAMISU)
+private object GlassDirectDrawPrograms {
+  val rim by lazyGlassProgram { GlassRimProgram(RuntimeShader(GlassShaders.buildRim(false))) }
+  val mergedRim by lazyGlassProgram { GlassRimProgram(RuntimeShader(GlassShaders.buildRim(true))) }
+  val mergedBackground by lazyGlassProgram { RuntimeShader(GlassShaders.buildMergedBackground()) }
+}
+
+@RequiresApi(Build.VERSION_CODES.TIRAMISU)
+private class GlassRimUniformProvider(private val shader: RuntimeShader) : RuntimeShaderUniformProvider {
+  override fun setColorUniform(name: String, color: Color) = shader.setColorUniform(name, color.toAndroidColorLong())
 
   override fun setFloatUniform(name: String, value: Float) = shader.setFloatUniform(name, value)
 
@@ -94,7 +121,9 @@ private class GlassRimUniformProvider(private val shader: RuntimeShader) : Runti
   override fun setFloatUniform(name: String, value1: Float, value2: Float, value3: Float, value4: Float) =
     shader.setFloatUniform(name, value1, value2, value3, value4)
 
-  override fun setIntUniform(name: String, value: Int) = shader.setFloatUniform(name, value.toFloat())
+  override fun setFloatUniform(name: String, values: FloatArray) = shader.setFloatUniform(name, values)
+
+  override fun setIntUniform(name: String, value: Int) = shader.setIntUniform(name, value)
 
   override fun setChildShader(name: String, shader: Shader) = this.shader.setInputShader(name, shader)
 }

@@ -1,33 +1,32 @@
 [versions]
-agp = "9.4.1"
+agp = "9.5.0"
 androidx-activity = "1.13.0"
 androidx-benchmark = "1.5.0"
 androidx-camera = "1.6.2"
-androidx-collection = "1.6.0"
+androidx-collection = "1.7.0"
 androidx-lifecycle = "2.11.0"
 androidx-media3 = "1.11.1"
 androidx-test-ext-junit = "1.3.0"
 assertk = "0.28.1"
-coil = "3.6.2"
-compose-multiplatform = "1.12.1"
+coil = "3.6.3"
+compose-multiplatform = "1.12.2"
 # The web targets draw with the browser through this fork of Compose Multiplatform.
-compose-web-canvas = "1.13.0-beta01-webcanvas.1"
+compose-web-canvas = "1.13.0-beta01-webcanvas.5"
 # Material3 does not publish every Compose Multiplatform version.
 compose-material3 = "1.9.0"
-compose-material3-adaptive = "1.2.0"
-compose-navigation3 = "1.1.2"
+compose-material3-adaptive = "1.3.0"
+compose-navigation3 = "1.2.0"
 kotlinx-coroutines-swing = "1.11.0"
 ktlint = "1.0.1"
-kotlin = "2.4.20"
-ksp = "2.3.1"
-ktor = "3.6.0"
+kotlin = "2.4.21"
+ktor = "3.6.1"
 jetpack-compose = "1.12.1"
 kamera = "1.2"
 metalava = "0.5.1"
-navigation-compose = "2.9.2"
+navigation-compose = "2.10.0"
 robolectric = "4.17"
-roborazzi = "1.75.0"
-spotless = "8.10.2"
+roborazzi = "1.77.0"
+spotless = "8.10.4"
 leakcanary = "2.14"
 
 [plugins]
@@ -73,7 +72,7 @@ androidx-compose-ui-test-manifest = { module = "androidx.compose.ui:ui-test-mani
 
 androidx-navigation-compose = { module = "org.jetbrains.androidx.navigation:navigation-compose", version.ref = "navigation-compose" }
 
-androidx-tracing = "androidx.tracing:tracing-ktx:2.0.3"
+androidx-tracing = "androidx.tracing:tracing-ktx:2.0.5"
 
 compose-material-icons = "org.jetbrains.compose.material:material-icons-core:1.7.3"
 compose-components-resources = { module = "org.jetbrains.compose.components:components-resources", version.ref = "compose-multiplatform" }

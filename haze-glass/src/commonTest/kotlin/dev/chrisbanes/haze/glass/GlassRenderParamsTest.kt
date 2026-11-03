@@ -13,6 +13,7 @@ import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
@@ -26,14 +27,42 @@ import assertk.assertions.containsExactly
 import assertk.assertions.hasMessage
 import assertk.assertions.isCloseTo
 import assertk.assertions.isEqualTo
+import assertk.assertions.isFalse
 import assertk.assertions.isGreaterThan
 import assertk.assertions.isGreaterThanOrEqualTo
 import assertk.assertions.isInstanceOf
 import assertk.assertions.isLessThan
+import assertk.assertions.isLessThanOrEqualTo
+import assertk.assertions.isNull
+import assertk.assertions.isTrue
+import dev.chrisbanes.haze.HazeProgressive
 import kotlin.math.sqrt
 import kotlin.test.Test
 
 class GlassRenderParamsTest {
+  @Test
+  fun reducedTransparencyFallbackColor_requiresSpecifiedOpaqueOverride() {
+    for (color in listOf(Color.Unspecified, Color.Transparent, Color.Red.copy(alpha = 0.5f))) {
+      assertFailure { GlassAccessibilitySettings(reducedTransparencyFallbackColor = color) }
+        .isInstanceOf<IllegalArgumentException>()
+    }
+  }
+
+  @Test
+  fun reducedTransparencyFallbackColor_doesNotChangeFullRendererOptics() {
+    val effect = GlassRuntimeEffect().apply {
+      accessibilitySettings = GlassAccessibilitySettings(reduceTransparency = true)
+    }
+    fun resolve() = resolveGlassStyle(effect, Size(100f, 100f), Density(1f), LayoutDirection.Ltr)
+    val automatic = resolve()
+    effect.accessibilitySettings = GlassAccessibilitySettings(true, reducedTransparencyFallbackColor = Color.Green)
+    val overridden = resolve()
+    assertThat(overridden.copy(fallbackBaseColor = automatic.fallbackBaseColor)).isEqualTo(automatic)
+    assertThat(overridden.fallbackBaseColor).isEqualTo(Color.Green)
+    val coordinates = GlassCoordinates(Size(100f, 100f), Offset.Zero, Size(100f, 100f), 1f)
+    assertThat(buildGlassRenderParams(overridden, coordinates)).isEqualTo(buildGlassRenderParams(automatic, coordinates))
+  }
+
   @Test
   fun edgeWidth_resolvesIndependentlyOfMaterialSizeAndSurfaceHeight() {
     for (size in listOf(Size(240f, 64f), Size(280f, 176f), Size.Zero)) {
@@ -64,10 +93,10 @@ class GlassRenderParamsTest {
   }
 
   @Test
-  fun accessibilitySettings_reduceBlurAndStrengthenMaterialSeparation() {
+  fun accessibilitySettings_diffuseBlurAndStrengthenMaterialSeparation() {
     val effect = GlassRuntimeEffect().apply {
       style = GlassStyle {
-        optics(GlassOptics(blurRadius = OpticalSizeValue.Fixed(10.dp)))
+        optics(GlassOptics(blurRadius = OpticalSizeValue.Fixed(30.dp), depth = OpticalSizeValue.Fixed(0f)))
         specularIntensity(0f)
         edgeShadow(androidx.compose.ui.graphics.Color.Transparent)
         edgeSoftness(0.dp)
@@ -87,11 +116,48 @@ class GlassRenderParamsTest {
       layoutDirection = LayoutDirection.Ltr,
     )
 
-    assertThat(resolved.resolvedOptics.blurRadiusPx).isEqualTo(6.5f)
+    assertThat(resolved.resolvedOptics.blurRadiusPx).isEqualTo(45f)
+    assertThat(resolved.resolvedOptics.depth).isEqualTo(1f)
     assertThat(resolved.contrast).isEqualTo(0.16f)
     assertThat(resolved.specularIntensity).isEqualTo(0.58f)
     assertThat(resolved.edgeSoftnessPx).isEqualTo(1f)
     assertThat(resolved.edgeShadow.alpha).isCloseTo(0.32f, 0.002f)
+  }
+
+  @Test
+  fun reduceTransparency_raisesShallowBlurToMinimum() {
+    val effect = GlassRuntimeEffect().apply {
+      style = GlassStyle { optics(GlassOptics(blurRadius = OpticalSizeValue.Fixed(1.dp))) }
+      accessibilitySettings = GlassAccessibilitySettings(reduceTransparency = true)
+    }
+
+    val resolved = resolveGlassStyle(
+      effect = effect,
+      materialSizePx = Size(100f, 100f),
+      density = Density(1f),
+      layoutDirection = LayoutDirection.Ltr,
+    )
+
+    assertThat(resolved.resolvedOptics.blurRadiusPx).isEqualTo(20f)
+  }
+
+  @Test
+  fun reduceTransparency_removesProgressiveMask() {
+    val effect = GlassRuntimeEffect().apply {
+      style = GlassStyle {
+        optics(GlassOptics(progressive = HazeProgressive.verticalGradient()))
+      }
+      accessibilitySettings = GlassAccessibilitySettings(reduceTransparency = true)
+    }
+
+    val resolved = resolveGlassStyle(
+      effect = effect,
+      materialSizePx = Size(100f, 100f),
+      density = Density(1f),
+      layoutDirection = LayoutDirection.Ltr,
+    )
+
+    assertThat(resolved.resolvedOptics.progressive).isNull()
   }
 
   @Test
@@ -436,6 +502,33 @@ class GlassRenderParamsTest {
 
     assertThat(reserved.width).isGreaterThanOrEqualTo(runtime.bounds.width)
     assertThat(reserved.height).isGreaterThanOrEqualTo(runtime.bounds.height)
+    assertPatchContainsCompositeBounds(runtime)
+
+    val lightingParams = testRenderParams(
+      coordinates = GlassCoordinates(Size(200f, 200f), Offset.Zero, Size(100f, 100f), 1f),
+    )
+    val lightingOnly = GlassInteractionTopology(false, true, 1f)
+    listOf(
+      Offset(10.4f, 10.4f),
+      Offset(100.6f, 50.5f),
+      Offset(195.6f, 195.3f),
+    ).forEach { position ->
+      val patch = checkNotNull(
+        resolveGlassInteractionPatch(
+          lightingParams,
+          GlassInteractionUniforms(position, 5f, 1f, 1f, 0f),
+          lightingOnly,
+        ),
+      )
+      assertPatchContainsCompositeBounds(patch)
+    }
+  }
+
+  private fun assertPatchContainsCompositeBounds(patch: GlassInteractionPatch) {
+    assertThat(patch.compositeBounds.left).isGreaterThanOrEqualTo(patch.bounds.left)
+    assertThat(patch.compositeBounds.top).isGreaterThanOrEqualTo(patch.bounds.top)
+    assertThat(patch.compositeBounds.right).isLessThanOrEqualTo(patch.bounds.right)
+    assertThat(patch.compositeBounds.bottom).isLessThanOrEqualTo(patch.bounds.bottom)
   }
 
   @Test
@@ -532,28 +625,16 @@ class GlassRenderParamsTest {
   }
 
   @Test
-  fun resolvedStyle_nonFiniteOrNegativeCornerRadiiUseSafeDefaultRadii() {
+  fun resolvedStyle_nonFiniteCornerRadiiUseSafeDefaultRadii() {
     val defaultRadii = GlassDefaults.shape.toCornerRadiiPx(
       layerSize = Size(100f, 80f),
       density = Density(1f),
       layoutDirection = LayoutDirection.Ltr,
     )
 
-    listOf(Float.NaN, Float.POSITIVE_INFINITY, -1f).forEach { invalidRadius ->
-      val effect = GlassRuntimeEffect().apply {
-        style = style.then {
-          shape(
-            RoundedCornerShape(
-              object : CornerSize {
-                override fun toPx(shapeSize: Size, density: Density): Float = invalidRadius
-              },
-            ),
-          )
-        }
-      }
-
+    listOf(Float.NaN, Float.POSITIVE_INFINITY).forEach { invalidRadius ->
       val resolved = resolveGlassStyle(
-        effect = effect,
+        effect = effectWithShape(RoundedCornerShape(fixedPxCorner(invalidRadius))),
         materialSizePx = Size(100f, 80f),
         density = Density(1f),
         layoutDirection = LayoutDirection.Ltr,
@@ -562,6 +643,35 @@ class GlassRenderParamsTest {
       assertThat(resolved.cornerRadii).isEqualTo(defaultRadii)
     }
   }
+
+  @Test
+  fun resolvedStyle_negativeCornerRadiiAreClampedToZero() {
+    val allNegative = effectWithShape(RoundedCornerShape(fixedPxCorner(-1f)))
+    val mixed = effectWithShape(
+      RoundedCornerShape(
+        topStart = fixedPxCorner(-4f),
+        topEnd = fixedPxCorner(12f),
+        bottomEnd = fixedPxCorner(12f),
+        bottomStart = fixedPxCorner(12f),
+      ),
+    )
+
+    assertThat(
+      resolveGlassStyle(allNegative, Size(100f, 80f), Density(1f), LayoutDirection.Ltr).cornerRadii,
+    ).isEqualTo(CornerRadii.zero)
+    assertThat(
+      resolveGlassStyle(mixed, Size(100f, 80f), Density(1f), LayoutDirection.Ltr).cornerRadii,
+    ).isEqualTo(CornerRadii(topLeft = 0f, topRight = 12f, bottomRight = 12f, bottomLeft = 12f))
+    assertThat(RoundedCornerShape(fixedPxCorner(-1f)).hasZeroCornerRadii()).isTrue()
+    assertThat(RoundedCornerShape(fixedPxCorner(Float.NEGATIVE_INFINITY)).hasZeroCornerRadii()).isFalse()
+  }
+
+  private fun fixedPxCorner(px: Float): CornerSize = object : CornerSize {
+    override fun toPx(shapeSize: Size, density: Density): Float = px
+  }
+
+  private fun effectWithShape(shape: RoundedCornerShape): GlassRuntimeEffect =
+    GlassRuntimeEffect().apply { style = style.then { shape(shape) } }
 
   @Test
   fun resolvedStyle_propagatesCornerSizeConversionFailures() {
@@ -588,6 +698,60 @@ class GlassRenderParamsTest {
       )
     }.isInstanceOf<IllegalArgumentException>()
       .hasMessage("custom corner conversion failed")
+  }
+
+  @Test
+  fun mergedField_resolvesOpticsFromOpticalSizeAndScalesWithInput() {
+    val field = mergedField(
+      mergedMember(10f, 20f, 100f, 40f, radius = 20f),
+      mergedMember(130f, 20f, 100f, 40f, radius = 20f),
+      opticalSize = Size(100f, 40f),
+    )
+    val effect = GlassRuntimeEffect().apply {
+      style = GlassStyle { optics(GlassOptics(refractionHeightFraction = 0.5f)) }
+      mergedField = field
+    }
+    val materialSize = Size(260f, 120f)
+    val style = resolveGlassStyle(effect, materialSize, Density(1f), LayoutDirection.Ltr)
+    val memberSized = resolveGlassStyle(
+      GlassRuntimeEffect().apply { this.style = effect.style },
+      Size(100f, 40f),
+      Density(1f),
+      LayoutDirection.Ltr,
+    )
+    val layerSized = resolveGlassStyle(
+      GlassRuntimeEffect().apply { this.style = effect.style },
+      materialSize,
+      Density(1f),
+      LayoutDirection.Ltr,
+    )
+    assertThat(style.resolvedOptics).isEqualTo(memberSized.resolvedOptics)
+    assertThat(style.resolvedOptics.refractionHeightPx).isLessThan(layerSized.resolvedOptics.refractionHeightPx)
+
+    val params = buildGlassRenderParams(
+      style,
+      GlassCoordinates(materialSize * 0.5f, Offset.Zero, materialSize * 0.5f, 0.5f),
+    )
+    assertThat(params.mergedField).isEqualTo(field.scaled(0.5f))
+  }
+
+  @Test
+  fun mergedField_preparedRenderDropsInteractionLayers() {
+    val field = mergedField(mergedMember(0f, 0f, 100f, 80f))
+    val coordinates = GlassCoordinates(Size(100f, 80f), Offset.Zero, Size(100f, 80f), 1f)
+    val params = testRenderParams(depth = 0.5f, blurRadiusPx = 12f).copy(
+      coordinates = coordinates,
+      mergedField = field,
+    )
+    val interaction = GlassInteractionUniforms(Offset(50f, 40f), 30f, 1f, 1.5f, 0.2f)
+    val prepared = buildGlassPreparedRender(
+      params = params,
+      interactionUniforms = interaction,
+      alpha = 1f,
+      outputSize = IntSize(100, 80),
+    )
+    assertThat(prepared.interactionTopology.hasAnyLayer).isFalse()
+    assertThat(prepared.interactionPatchSize).isEqualTo(IntSize.Zero)
   }
 
   @Test
@@ -800,9 +964,9 @@ class GlassRenderParamsTest {
         density = Density(1f),
       )
 
-    val clearSmall = resolve(GlassStyle.clearOptics, 64.dp)
-    val clearMedium = resolve(GlassStyle.clearOptics, 176.dp)
-    val clearLarge = resolve(GlassStyle.clearOptics, 220.dp)
+    val clearSmall = resolve(GlassOptics.clear, 64.dp)
+    val clearMedium = resolve(GlassOptics.clear, 176.dp)
+    val clearLarge = resolve(GlassOptics.clear, 220.dp)
     assertThat(clearSmall.depth).isEqualTo(1f)
     assertThat(clearSmall.blurRadiusPx).isEqualTo(1.25f)
     assertThat(clearMedium.depth).isEqualTo(1f)
@@ -810,9 +974,9 @@ class GlassRenderParamsTest {
     assertThat(clearLarge.depth).isEqualTo(1f)
     assertThat(clearLarge.blurRadiusPx).isEqualTo(1.25f)
 
-    val regularSmall = resolve(GlassDefaults.optics, 64.dp)
-    val regularMedium = resolve(GlassDefaults.optics, 176.dp)
-    val regularLarge = resolve(GlassDefaults.optics, 220.dp)
+    val regularSmall = resolve(GlassOptics.regular, 64.dp)
+    val regularMedium = resolve(GlassOptics.regular, 176.dp)
+    val regularLarge = resolve(GlassOptics.regular, 220.dp)
     assertThat(regularSmall.depth).isEqualTo(0.65f)
     assertThat(regularSmall.blurRadiusPx).isCloseTo(20f, 0.000001f)
     assertThat(regularMedium.depth).isEqualTo(1f)
@@ -823,7 +987,7 @@ class GlassRenderParamsTest {
 
   @Test
   fun builtInStyles_areDensityAndRotationInvariant() {
-    listOf(GlassDefaults.optics, GlassStyle.clearOptics).forEach { optics ->
+    listOf(GlassOptics.regular, GlassOptics.clear).forEach { optics ->
       val first = resolveGlassOptics(
         optics = optics,
         materialSizePx = Size(280f, 176f),
@@ -905,7 +1069,7 @@ class GlassRenderParamsTest {
 
   @Test
   fun builtInStyles_preserveAuthoredOpticalValues() {
-    val regular = GlassDefaults.optics
+    val regular = GlassOptics.regular
     assertThat(regular.refractionStrength).isEqualTo(0.7f)
     assertThat(regular.refractionDisplacement).isEqualTo(48.dp)
     assertThat(regular.refractionProfile).isEqualTo(RefractionProfile.Edge(20.dp))
@@ -913,7 +1077,7 @@ class GlassRenderParamsTest {
     assertThat(regular.refractionFoldStrength).isEqualTo(0f)
     assertThat(regular.refractionDetailIntensity).isEqualTo(0f)
 
-    val clear = GlassStyle.clearOptics
+    val clear = GlassOptics.clear
     assertThat(clear.refractionStrength).isEqualTo(0.85f)
     assertThat(clear.refractionDisplacement).isEqualTo(56.dp)
     assertThat(clear.refractionHeightFraction).isEqualTo(0.35f)
@@ -924,17 +1088,17 @@ class GlassRenderParamsTest {
 
   @Test
   fun equalCallerOptics_resolveLikeBuiltInClear() {
-    val callerCopy = GlassStyle.clearOptics.copy()
+    val callerCopy = GlassOptics.clear.copy()
     val materialSize = Size(320f, 220f)
     val density = Density(1f)
     val builtIn = resolveGlassOptics(
-      GlassStyle.clearOptics,
+      GlassOptics.clear,
       materialSize,
       density,
     )
     val caller = resolveGlassOptics(callerCopy, materialSize, density)
 
-    assertThat(callerCopy).isEqualTo(GlassStyle.clearOptics)
+    assertThat(callerCopy).isEqualTo(GlassOptics.clear)
     assertThat(caller.depth).isEqualTo(1f)
     assertThat(caller.blurRadiusPx).isEqualTo(1.25f)
     assertThat(builtIn.depth).isEqualTo(1f)
@@ -1004,6 +1168,61 @@ class GlassRenderParamsTest {
     assertThat(coordinates.sampleSize).isEqualTo(Size(105f, 75f))
     assertThat(coordinates.materialOrigin).isEqualTo(Offset(15f, 7.5f))
     assertThat(coordinates.materialSize).isEqualTo(Size(75f, 60f))
+  }
+
+  @Test
+  fun buildGlassRenderParams_clampsAreNoOpsForValidatedOptics() {
+    val materialSize = Size(100f, 80f)
+    listOf(
+      GlassOptics(),
+      GlassOptics(
+        refractionStrength = 1f,
+        refractionHeightFraction = 1f,
+        refractionDisplacement = 40.dp,
+        refractionDetailIntensity = 1f,
+        depth = OpticalSizeValue.Fixed(1f),
+        blurRadius = OpticalSizeValue.Fixed(24.dp),
+      ),
+      GlassOptics(refractionProfile = RefractionProfile.Edge(12.dp)),
+      GlassOptics(
+        refractionStrength = 0f,
+        refractionDisplacement = 0.dp,
+        depth = OpticalSizeValue.Fixed(0f),
+        blurRadius = OpticalSizeValue.Fixed(0.dp),
+      ),
+    ).forEach { optics ->
+      val effect = GlassRuntimeEffect().apply {
+        style = style.then { optics(optics) }
+      }
+      val style = resolveGlassStyle(
+        effect = effect,
+        materialSizePx = materialSize,
+        density = Density(1f),
+        layoutDirection = LayoutDirection.Ltr,
+      )
+      val resolved = style.resolvedOptics
+
+      listOf(1f, 0.5f).forEach { scaleFactor ->
+        val params = buildGlassRenderParams(
+          style = style,
+          coordinates = GlassCoordinates(materialSize, Offset.Zero, materialSize, scaleFactor),
+        )
+
+        assertThat(params.refractionStrength).isEqualTo(resolved.refractionStrength)
+        assertThat(params.refractionScalePx).isEqualTo(resolved.refractionScalePx * scaleFactor)
+        assertThat(params.refractionHeightPx).isEqualTo(resolved.refractionHeightPx * scaleFactor)
+        assertThat(params.edgeRefractionWidthPx).isEqualTo(
+          if (resolved.edgeRefractionWidthPx >= 0f) {
+            resolved.edgeRefractionWidthPx * scaleFactor
+          } else {
+            -1f
+          },
+        )
+        assertThat(params.blurRadiusPx).isEqualTo(resolved.blurRadiusPx * scaleFactor)
+        assertThat(params.depth).isEqualTo(resolved.depth)
+        assertThat(params.sampleStepPx).isEqualTo(2f * scaleFactor)
+      }
+    }
   }
 
   @Test
@@ -1422,6 +1641,22 @@ class GlassRenderParamsTest {
       edgeSoftnessPx = with(density) { effect.edgeSoftness.toPx() },
       foregroundOutsetPx = 0f,
     )
+  }
+
+  @Test
+  fun hasGlassRim_isFalseWithoutSpecularOrShadow() {
+    assertThat(hasGlassRim(0f, Color.Transparent)).isFalse()
+    assertThat(hasGlassRim(0f, Color.Black.copy(alpha = 0f))).isFalse()
+  }
+
+  @Test
+  fun hasGlassRim_isTrueForSpecularOnly() {
+    assertThat(hasGlassRim(0.5f, Color.Transparent)).isTrue()
+  }
+
+  @Test
+  fun hasGlassRim_isTrueForShadowOnly() {
+    assertThat(hasGlassRim(0f, Color.Black.copy(alpha = 0.14f))).isTrue()
   }
 
   private fun testRenderParams(

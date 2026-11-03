@@ -16,12 +16,17 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PixelMap
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.graphics.layer.GraphicsLayer
 import androidx.compose.ui.graphics.toPixelMap
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.captureToImage
@@ -30,9 +35,13 @@ import androidx.compose.ui.test.moveTo
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.v2.runComposeUiTest
+import androidx.compose.ui.test.v2.runSkikoComposeUiTest
 import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.roundToIntSize
+import androidx.compose.ui.unit.toSize
 import assertk.assertThat
 import assertk.assertions.isEqualTo
 import assertk.assertions.isFalse
@@ -71,9 +80,494 @@ class RuntimeShaderGlassDelegateIntegrationTest : ContextTest() {
     mutableMapOf<GlassRuntimeEffect, HazeEffectFactory<GlassNodeConfiguration>>()
 
   @Test
+  fun unchangedSourceRedraw_reusesRecordedStages() = runComposeUiTest {
+    val effect = GlassRuntimeEffect()
+    val style = GlassStyle.regular
+    setContent { SourceBackedGlassTestContent(effect, style = style) }
+    waitForIdle()
+
+    val delegate = runtime(effect).delegate as RuntimeShaderGlassDelegate
+
+    val before = delegate.stageRecordCounts
+    assertThat(before.source).isGreaterThan(0)
+    assertThat(before.optical).isGreaterThan(0)
+    repeat(3) {
+      runOnIdle { checkNotNull(effect.attachedContextForTest).invalidateDraw() }
+      waitForIdle()
+
+      assertThat(delegate.stageRecordCounts).isEqualTo(before)
+    }
+  }
+
+  @Test
+  fun unchangedSourceRedraw_reusesStageInputsAndSourceSnapshot() = runComposeUiTest {
+    val effect = GlassRuntimeEffect()
+    setContent { SourceBackedGlassTestContent(effect, style = GlassStyle.regular) }
+    waitForIdle()
+
+    val delegate = runtime(effect).delegate as RuntimeShaderGlassDelegate
+    val stageInputs = checkNotNull(delegate.lastSuccessfulStageInputs)
+    val sourceSnapshot = checkNotNull(delegate.lastSuccessfulSourceSnapshot)
+    repeat(3) {
+      runOnIdle { checkNotNull(effect.attachedContextForTest).invalidateDraw() }
+      waitForIdle()
+
+      assertThat(delegate.lastSuccessfulStageInputs).isSameInstanceAs(stageInputs)
+      assertThat(delegate.lastSuccessfulSourceSnapshot).isSameInstanceAs(sourceSnapshot)
+    }
+  }
+
+  @Test
+  fun growAndShrink_balancedRetainsLayersAndMatchesFreshPixels() = assertResizeMatchesFreshPixels(HazePerformanceMode.Balanced)
+
+  @Test
+  fun growAndShrink_qualityRetainsLayersAndMatchesFreshPixels() = assertResizeMatchesFreshPixels(HazePerformanceMode.Quality)
+
+  private fun assertResizeMatchesFreshPixels(mode: HazePerformanceMode) = runSkikoComposeUiTest(
+    size = Size(400f, 400f),
+    density = Density(2.75f),
+  ) {
+    val reused = GlassRuntimeEffect()
+    val displayedEffect = mutableStateOf(GlassRuntimeEffect())
+    val physicalSize = mutableStateOf(203)
+    val style = GlassStyle.regular.then {
+      shape(RoundedCornerShape(0.dp))
+      edgeSoftness(0.dp)
+      specularIntensity(0f)
+      alpha(0.5f)
+      optics(
+        GlassOptics(
+          refractionStrength = 0f,
+          refractionDisplacement = 0.dp,
+          depth = OpticalSizeValue.Fixed(0f),
+          blurRadius = OpticalSizeValue.Fixed(0.dp),
+        ),
+      )
+    }
+    setContent {
+      ResizeGlassTestContent(displayedEffect.value, physicalSize.value, mode, style, "glass")
+    }
+    waitForIdle()
+    // References use the same screen origin: fractional input scaling can otherwise change
+    // sampling phase between two side-by-side panels even without retained layers.
+    val references = mutableMapOf<Int, PixelMap>()
+    for (targetSize in listOf(208, 203)) {
+      runOnIdle {
+        physicalSize.value = targetSize
+        displayedEffect.value = GlassRuntimeEffect()
+      }
+      waitForIdle()
+      references[targetSize] = onNodeWithTag("glass").captureToImage().toPixelMap()
+    }
+    runOnIdle { displayedEffect.value = reused }
+    waitForIdle()
+    val delegate = runtime(reused).delegate as RuntimeShaderGlassDelegate
+    val source = checkNotNull(delegate.layers.source)
+    val optical = checkNotNull(delegate.layers.optical)
+    val groupAlpha = checkNotNull(delegate.layers.groupAlpha.layer)
+    // Known fixture dimensions: Balanced samples sqrt(0.625) of each axis. The capture
+    // allocations round to 160/164px while the independent outlines cover 161/165px.
+    val sourceAllocations = if (mode == HazePerformanceMode.Balanced) listOf(160, 164, 160, 164) else listOf(203, 208, 203, 208)
+    val sourceOutlines = if (mode == HazePerformanceMode.Balanced) listOf(161f, 165f, 161f, 165f) else listOf(203f, 208f, 203f, 208f)
+    assertThat(source.size).isEqualTo(IntSize(sourceAllocations[0], sourceAllocations[0]))
+    val initialSourceOutline = source.outline.bounds
+    val initialGroupOutline = groupAlpha.outline.bounds
+    assertThat(initialGroupOutline).isEqualTo(Rect(0f, 0f, 203f, 203f))
+    for ((index, targetSize) in listOf(208, 203, 208).withIndex()) {
+      val before = delegate.stageRecordCounts
+      runOnIdle {
+        physicalSize.value = targetSize
+      }
+      waitForIdle()
+      val actual = onNodeWithTag("glass").captureToImage().toPixelMap()
+      val expected = checkNotNull(references[targetSize])
+      assertThat(actual.width).isEqualTo(targetSize)
+      assertThat(actual.height).isEqualTo(targetSize)
+      assertThat(expected.width).isEqualTo(targetSize)
+      assertThat(expected.height).isEqualTo(targetSize)
+      // Compare every pixel, including the last row/column where stale outlines clip growth.
+      var mismatches = 0
+      for (y in 0 until targetSize) {
+        for (x in 0 until targetSize) {
+          if (actual[x, y] != expected[x, y]) mismatches++
+        }
+      }
+      assertThat(
+        mismatches,
+        "$mode at $targetSize physical pixels: source ${source.size}, ${source.outline.bounds}; " +
+          "optical ${optical.size}, ${optical.outline.bounds}; " +
+          "group alpha ${groupAlpha.size}, ${groupAlpha.outline.bounds}",
+      ).isEqualTo(0)
+      val allocation = sourceAllocations[index + 1]
+      val outline = sourceOutlines[index + 1]
+      assertThat(source.size).isEqualTo(IntSize(allocation, allocation))
+      assertThat(source.outline.bounds, "source outline after $initialSourceOutline").isEqualTo(Rect(0f, 0f, outline, outline))
+      val outputExtent = targetSize.toFloat()
+      assertThat(groupAlpha.size).isEqualTo(IntSize(targetSize, targetSize))
+      assertThat(groupAlpha.outline.bounds, "output outline after $initialGroupOutline").isEqualTo(Rect(0f, 0f, outputExtent, outputExtent))
+      assertThat(delegate.layers.source).isSameInstanceAs(source)
+      assertThat(delegate.layers.optical).isSameInstanceAs(optical)
+      assertThat(delegate.layers.groupAlpha.layer).isSameInstanceAs(groupAlpha)
+      assertThat(source.isReleased).isFalse()
+      assertThat(optical.isReleased).isFalse()
+      assertThat(groupAlpha.isReleased).isFalse()
+      assertThat(delegate.stageRecordCounts.source).isGreaterThan(before.source)
+      assertThat(delegate.stageRecordCounts.optical).isGreaterThan(before.optical)
+      val recorded = delegate.stageRecordCounts
+      runOnIdle { checkNotNull(reused.attachedContextForTest).invalidateDraw() }
+      waitForIdle()
+      assertThat(delegate.stageRecordCounts).isEqualTo(recorded)
+      assertExactResizePixels(onNodeWithTag("glass").captureToImage().toPixelMap(), expected)
+    }
+  }
+
+  @Test
+  fun resize_paddedBalancedRetainsEveryStageAndMatchesFreshPixels() = assertPipelineResize()
+
+  @Test
+  fun resize_fractionalAlphaRetainsOutputLayerAndMatchesFreshPixels() = assertPipelineResize(effectAlpha = 0.5f)
+
+  @Test
+  fun resize_paddedQualityRetainsEveryStageAndMatchesFreshPixels() = assertPipelineResize(mode = HazePerformanceMode.Quality)
+
+  @Test
+  fun resize_activeInteractionRetainsLocalPatchesAndMatchesFreshPixels() = assertPipelineResize(interaction = true)
+
+  private fun assertPipelineResize(
+    mode: HazePerformanceMode = HazePerformanceMode.Balanced,
+    effectAlpha: Float = 1f,
+    interaction: Boolean = false,
+  ) = runSkikoComposeUiTest(size = Size(400f, 400f), density = Density(1f)) {
+    fun newEffect() = animatedStageEffect().apply {
+      if (interaction) interactionReducedMotionPolicy = GlassReducedMotionPolicy.Full
+    }
+    val physicalSize = mutableStateOf(140)
+    val displayedEffect = mutableStateOf(newEffect())
+    val style = animatedStageEffect().style.then {
+      alpha(effectAlpha)
+      if (interaction) {
+        pressed {
+          animate(toSpec = tween(1), fromSpec = tween(1)) {
+            lightingIntensity(1f)
+            refractionMultiplier(1.08f)
+            whitePointDelta(0.04f)
+          }
+        }
+        interactionLightRadiusFraction(0.25f)
+        interactionPositionAnimationSpec(tween(1))
+      }
+    }
+    fun settleInteraction() {
+      if (interaction) {
+        runOnIdle { runtime(displayedEffect.value).setPressedForTest(Offset(40f, 40f)) }
+        mainClock.advanceTimeBy(64)
+        waitForIdle()
+      }
+    }
+    setContent {
+      ResizeGlassTestContent(displayedEffect.value, physicalSize.value, mode, style, "glass")
+    }
+    waitForIdle()
+    val references = mutableMapOf<Int, PixelMap>()
+    for (target in listOf(210, 100)) {
+      runOnIdle {
+        physicalSize.value = target
+        displayedEffect.value = newEffect()
+      }
+      waitForIdle()
+      settleInteraction()
+      references[target] = onNodeWithTag("glass").captureToImage().toPixelMap()
+    }
+    val reused = newEffect()
+    runOnIdle {
+      physicalSize.value = 140
+      displayedEffect.value = reused
+    }
+    waitForIdle()
+    settleInteraction()
+    val delegate = runtime(reused).delegate as RuntimeShaderGlassDelegate
+    val activeLayers = delegate.layers.activeLayersForResize()
+    assertThat(delegate.layers.blurred).isNotNull()
+    assertThat(delegate.layers.depthMixed).isNotNull()
+    assertThat(delegate.layers.refractionComposite).isNotNull()
+    if (effectAlpha < 1f) assertThat(delegate.layers.groupAlpha.layer).isNotNull()
+    if (interaction) {
+      assertThat(delegate.layers.interactionOptical).isNotNull()
+      assertThat(delegate.layers.interactionRefractionDetail).isNotNull()
+      assertThat(delegate.layers.interactionRefractionDetailCoverage).isNotNull()
+      assertThat(delegate.layers.interactionRefractionComposite).isNotNull()
+      assertThat(delegate.layers.interactionLighting).isNotNull()
+    }
+    // Observe every initial outline so cached geometry is exercised by the next recordings.
+    activeLayers.forEach { it.outline.bounds }
+    for (target in listOf(210, 100, 210)) {
+      val before = delegate.stageRecordCounts
+      val beforeInteraction = listOf(delegate.interactionOpticalRecordCount, delegate.interactionDetailRecordCount, delegate.interactionCompositeRecordCount, delegate.interactionLightingRecordCount)
+      runOnIdle { physicalSize.value = target }
+      waitForIdle()
+      settleInteraction()
+      val actual = onNodeWithTag("glass").captureToImage().toPixelMap()
+      assertExactResizePixels(actual, checkNotNull(references[target]))
+      val current = delegate.layers.activeLayersForResize()
+      assertThat(current.size).isEqualTo(activeLayers.size)
+      current.zip(activeLayers).forEach { (layer, original) ->
+        assertThat(layer).isSameInstanceAs(original)
+        assertThat(layer.isReleased).isFalse()
+        if (layer !== delegate.layers.source) {
+          assertThat(layer.outline.bounds.size).isEqualTo(layer.size.toSize())
+        }
+      }
+      val after = delegate.stageRecordCounts
+      assertThat(after.source).isGreaterThan(before.source)
+      assertThat(after.blur).isGreaterThan(before.blur)
+      assertThat(after.depth).isGreaterThan(before.depth)
+      assertThat(after.optical).isGreaterThan(before.optical)
+      assertThat(after.detail).isGreaterThan(before.detail)
+      assertThat(after.rim).isGreaterThan(before.rim)
+      val afterInteraction = listOf(delegate.interactionOpticalRecordCount, delegate.interactionDetailRecordCount, delegate.interactionCompositeRecordCount, delegate.interactionLightingRecordCount)
+      if (interaction) {
+        afterInteraction.zip(beforeInteraction).forEach { (recorded, previous) -> assertThat(recorded).isGreaterThan(previous) }
+      }
+      repeat(2) {
+        runOnIdle { checkNotNull(reused.attachedContextForTest).invalidateDraw() }
+        waitForIdle()
+        assertThat(delegate.stageRecordCounts).isEqualTo(after)
+        assertThat(listOf(delegate.interactionOpticalRecordCount, delegate.interactionDetailRecordCount, delegate.interactionCompositeRecordCount, delegate.interactionLightingRecordCount)).isEqualTo(afterInteraction)
+        assertExactResizePixels(onNodeWithTag("glass").captureToImage().toPixelMap(), checkNotNull(references[target]))
+      }
+    }
+  }
+
+  @Test
+  fun resize_unavailableSourceNeverReplaysStaleOutputAndRecovers() = runSkikoComposeUiTest(size = Size(400f, 400f), density = Density(1f)) {
+    val displayedEffect = mutableStateOf(animatedStageEffect())
+    val physicalSize = mutableStateOf(140)
+    val showSource = mutableStateOf(false)
+    val style = animatedStageEffect().style
+    setContent {
+      ResizeGlassTestContent(displayedEffect.value, physicalSize.value, HazePerformanceMode.Balanced, style, "glass", showSource.value)
+    }
+    waitForIdle()
+    val freshWithoutSource = mutableMapOf<Int, PixelMap>()
+    for (target in listOf(210, 100)) {
+      runOnIdle {
+        physicalSize.value = target
+        displayedEffect.value = animatedStageEffect()
+      }
+      waitForIdle()
+      freshWithoutSource[target] = onNodeWithTag("glass").captureToImage().toPixelMap()
+    }
+    val reused = animatedStageEffect()
+    runOnIdle {
+      physicalSize.value = 140
+      displayedEffect.value = reused
+      showSource.value = true
+    }
+    waitForIdle()
+    val delegate = runtime(reused).delegate as RuntimeShaderGlassDelegate
+    val recorded = delegate.stageRecordCounts
+    assertThat(delegate.canDrawRetainedOutput()).isTrue()
+    runOnIdle { showSource.value = false }
+    waitForIdle()
+    assertThat(delegate.canDrawRetainedOutput()).isTrue()
+    for (target in listOf(210, 100, 210)) {
+      runOnIdle { physicalSize.value = target }
+      waitForIdle()
+      assertThat(reused.canDrawRetainedOutput()).isFalse()
+      assertThat(delegate.lastSuccessfulSourceSnapshot).isNull()
+      assertThat(delegate.lastSuccessfulStageInputs).isNull()
+      assertExactResizePixels(onNodeWithTag("glass").captureToImage().toPixelMap(), checkNotNull(freshWithoutSource[target]))
+      runOnIdle { checkNotNull(reused.attachedContextForTest).invalidateDraw() }
+      waitForIdle()
+      assertThat(reused.canDrawRetainedOutput()).isFalse()
+    }
+    runOnIdle { showSource.value = true }
+    waitForIdle()
+    assertThat(reused.canDrawRetainedOutput()).isTrue()
+    assertThat((runtime(reused).delegate as RuntimeShaderGlassDelegate).stageRecordCounts.source).isGreaterThan(recorded.source)
+  }
+
+  private fun assertExactResizePixels(actual: PixelMap, expected: PixelMap) {
+    assertThat(actual.width).isEqualTo(expected.width)
+    assertThat(actual.height).isEqualTo(expected.height)
+    var mismatches = 0
+    for (y in 0 until actual.height) {
+      for (x in 0 until actual.width) {
+        if (actual[x, y] != expected[x, y]) mismatches++
+      }
+    }
+    assertThat(mismatches).isEqualTo(0)
+  }
+
+  private fun GlassLayers.activeLayersForResize(): List<GraphicsLayer> = listOfNotNull(
+    groupAlpha.layer,
+    source,
+    blurHorizontal,
+    blurred,
+    depthMixed,
+    optical,
+    refractionDetail,
+    refractionDetailCoverage,
+    refractionComposite,
+    interactionOptical,
+    interactionRefractionDetail,
+    interactionRefractionDetailCoverage,
+    interactionRefractionComposite,
+    interactionLighting,
+    rim,
+  )
+
+  @Composable
+  private fun ResizeGlassTestContent(
+    effect: GlassRuntimeEffect,
+    physicalSize: Int,
+    mode: HazePerformanceMode,
+    style: GlassStyle,
+    tag: String,
+    showSource: Boolean = true,
+  ) {
+    val state = remember { HazeState() }
+    val density = LocalDensity.current
+    Box(Modifier.size(with(density) { 240.toDp() })) {
+      // The source stays stationary and larger than either effect size. The opaque cover
+      // prevents a missing effect pixel from accidentally matching the source below it.
+      if (showSource) {
+        Canvas(Modifier.fillMaxSize().hazeSource(state)) {
+          drawRect(Color.Blue)
+          for (x in 0 until 240 step 8) {
+            drawRect(Color.Red, Offset(x.toFloat(), 0f), Size(4f, 240f))
+          }
+        }
+      }
+      Box(Modifier.fillMaxSize().background(Color.Black))
+      Box(
+        Modifier
+          .size(with(density) { physicalSize.toDp() })
+          .testTag(tag)
+          .testGlass(effect, HazeInput.Sources(state), mode, style),
+      )
+    }
+  }
+
+  @Test
+  fun sourceGeometryAndStyleChanges_refreshRequiredStagesThenReuse() = runComposeUiTest {
+    val effect = animatedStageEffect()
+    val color = mutableStateOf(Color.Red)
+    val size = mutableStateOf(120.dp)
+    // Detail composites have their own recording counter; isolate optical-only invalidation here.
+    val style = mutableStateOf(effect.style.then { optics(effect.optics.copy(refractionDetailIntensity = 0f)) })
+    setContent { SourceBackedGlassTestContent(effect, color.value, size.value, style.value) }
+    waitForIdle()
+    val delegate = runtime(effect).delegate as RuntimeShaderGlassDelegate
+    assertThat(effect.preparedRender?.refractionDetailKey).isNull()
+    assertThat(delegate.layers.refractionDetail).isNull()
+    assertThat(delegate.stageRecordCounts.detail).isEqualTo(0)
+    fun assertReuse() {
+      val counts = delegate.stageRecordCounts
+      repeat(2) {
+        runOnIdle { checkNotNull(effect.attachedContextForTest).invalidateDraw() }
+        waitForIdle()
+        assertThat(delegate.stageRecordCounts).isEqualTo(counts)
+      }
+    }
+    var before = delegate.stageRecordCounts
+    runOnIdle { color.value = Color.Blue }
+    waitForIdle()
+    runOnIdle { checkNotNull(effect.attachedContextForTest).invalidateDraw() }
+    waitForIdle()
+    assertThat(delegate.stageRecordCounts.source).isGreaterThan(before.source)
+    assertThat(delegate.stageRecordCounts.blur).isGreaterThan(before.blur)
+    assertThat(delegate.stageRecordCounts.depth).isGreaterThan(before.depth)
+    assertThat(delegate.stageRecordCounts.optical).isGreaterThan(before.optical)
+    assertThat(delegate.stageRecordCounts.rim).isEqualTo(before.rim)
+    assertReuse()
+    before = delegate.stageRecordCounts
+    runOnIdle { size.value = 140.dp }
+    waitForIdle()
+    assertThat(delegate.stageRecordCounts.source).isGreaterThan(before.source)
+    assertThat(delegate.stageRecordCounts.optical).isGreaterThan(before.optical)
+    assertReuse()
+    before = delegate.stageRecordCounts
+    runOnIdle { style.value = style.value.then { ambientResponse(0.6f) } }
+    waitForIdle()
+    assertThat(delegate.stageRecordCounts).isEqualTo(before.copy(optical = before.optical + 1))
+    assertReuse()
+    before = delegate.stageRecordCounts
+    runOnIdle { style.value = style.value.then { lightPosition(exactLightAlignment(Offset(10f, 20f))) } }
+    waitForIdle()
+    assertThat(delegate.stageRecordCounts).isEqualTo(before.copy(rim = before.rim + 1))
+    assertReuse()
+  }
+
+  @Test
+  fun refractionTopologyChanges_refreshRequiredStagesThenReuse() = runComposeUiTest {
+    val effect = animatedStageEffect()
+    val optics = effect.optics.copy(refractionProfile = RefractionProfile.Edge(14.dp))
+    val style = mutableStateOf(effect.style.then { optics(optics) })
+    setContent { SourceBackedGlassTestContent(effect, style = style.value) }
+    waitForIdle()
+    val delegate = runtime(effect).delegate as RuntimeShaderGlassDelegate
+    val initialDetail = checkNotNull(delegate.layers.refractionDetail)
+    val initialCount = delegate.stageRecordCounts.detail
+    for (width in listOf(0.dp, 14.dp)) {
+      runOnIdle { style.value = effect.style.then { optics(optics.copy(refractionProfile = RefractionProfile.Edge(width))) } }
+      waitForIdle()
+      if (width == 0.dp) {
+        assertThat(initialDetail.isReleased).isTrue()
+        assertThat(delegate.layers.refractionDetail).isNull()
+      } else {
+        assertThat(delegate.layers.refractionDetail).isNotNull()
+        assertThat(delegate.layers.refractionDetail).isNotSameInstanceAs(initialDetail)
+        assertThat(delegate.stageRecordCounts.detail).isGreaterThan(initialCount)
+      }
+      val counts = delegate.stageRecordCounts
+      repeat(2) {
+        runOnIdle { checkNotNull(effect.attachedContextForTest).invalidateDraw() }
+        waitForIdle()
+        assertThat(delegate.stageRecordCounts).isEqualTo(counts)
+      }
+    }
+  }
+
+  @Test
+  fun releasedResources_rebuildOnceThenReuse() {
+    for (level in listOf(TrimMemoryLevel.UI_HIDDEN, TrimMemoryLevel.MODERATE, TrimMemoryLevel.COMPLETE, null)) {
+      runComposeUiTest {
+        val effect = GlassRuntimeEffect()
+        setContent { SourceBackedGlassTestContent(effect, style = GlassStyle.regular) }
+        waitForIdle()
+        val delegate = runtime(effect).delegate as RuntimeShaderGlassDelegate
+        val source = checkNotNull(delegate.layers.source)
+        val optical = checkNotNull(delegate.layers.optical)
+        val before = delegate.stageRecordCounts
+        runOnIdle {
+          if (level == null) effect.clearRetainedOutput() else effect.onTrimMemory(level)
+          assertThat(source.isReleased).isTrue()
+          assertThat(optical.isReleased).isTrue()
+          assertThat(delegate.lastSuccessfulSourceSnapshot).isNull()
+          assertThat(delegate.lastSuccessfulStageInputs).isNull()
+          checkNotNull(effect.attachedContextForTest).invalidateDraw()
+        }
+        waitForIdle()
+        assertThat(delegate.layers.source).isNotSameInstanceAs(source)
+        assertThat(delegate.layers.optical).isNotSameInstanceAs(optical)
+        assertThat(delegate.stageRecordCounts.source).isGreaterThan(before.source)
+        assertThat(delegate.stageRecordCounts.optical).isGreaterThan(before.optical)
+        assertThat(effect.canDrawRetainedOutput()).isTrue()
+        val recovered = delegate.stageRecordCounts
+        repeat(2) {
+          runOnIdle { checkNotNull(effect.attachedContextForTest).invalidateDraw() }
+          waitForIdle()
+          assertThat(delegate.stageRecordCounts).isEqualTo(recovered)
+        }
+      }
+    }
+  }
+
+  @Test
   fun backgroundOpacityChange_updatesRetainedBlurNormalization() = runComposeUiTest {
     val base = GlassStyle.regular.then {
-      optics(GlassDefaults.optics.copy(progressive = HazeProgressive.verticalGradient()))
+      optics(GlassOptics.regular.copy(progressive = HazeProgressive.verticalGradient()))
     }
     val effect = GlassRuntimeEffect()
     val style = mutableStateOf(base.then { backgroundColor(Color.White) })
@@ -94,9 +588,47 @@ class RuntimeShaderGlassDelegateIntegrationTest : ContextTest() {
   }
 
   @Test
+  fun mergedField_rendersWithoutInteractionStagesAndUnsetRestoresSingleSurface() = runComposeUiTest {
+    val effect = runtimeInteractiveEffect()
+    val field = mergedField(
+      mergedMember(4f, 4f, 40f, 40f, radius = 8f, tint = Color.Red, backgroundColor = Color.Blue),
+      mergedMember(50f, 4f, 40f, 40f, radius = 8f, tint = Color.Blue, backgroundColor = Color.Blue),
+      mergeDistancePx = 16f,
+    )
+    setContent { RuntimeGlassTestContent(effect, tag = "glass") }
+    waitForIdle()
+    val delegate = runtime(effect).delegate as RuntimeShaderGlassDelegate
+    val single = checkNotNull(runtime(effect).preparedRender)
+
+    runOnIdle { effect.mergedField = field }
+    waitForIdle()
+    // Pressing requests interaction optics, detail and lighting, which a merged field skips.
+    onNodeWithTag("glass").performTouchInput { down(Offset(20f, 20f)) }
+    mainClock.advanceTimeBy(500)
+    waitForIdle()
+    val merged = checkNotNull(runtime(effect).preparedRender)
+    assertThat(merged.opticalKey.mergedField).isNotNull()
+    assertThat(merged.rimKey?.mergedField).isNotNull()
+    assertThat(merged.interactionTopology.hasAnyLayer).isFalse()
+    assertThat(delegate.layers.interactionOptical).isNull()
+    assertThat(delegate.layers.interactionLighting).isNull()
+    assertThat(effect.canDrawRetainedOutput()).isTrue()
+
+    val before = delegate.stageRecordCounts
+    runOnIdle { effect.mergedField = null }
+    waitForIdle()
+    val restored = checkNotNull(runtime(effect).preparedRender)
+    assertThat(restored.opticalKey).isEqualTo(single.opticalKey.copy(coordinates = restored.opticalKey.coordinates))
+    assertThat(restored.opticalKey.mergedField).isNull()
+    assertThat(delegate.stageRecordCounts.source).isGreaterThan(before.source)
+    assertThat(delegate.stageRecordCounts.optical).isGreaterThan(before.optical)
+    assertThat(effect.canDrawRetainedOutput()).isTrue()
+  }
+
+  @Test
   fun edgeWidthChange_refreshesBothSamplingPassesAndZeroReleasesDetail() = runComposeUiTest {
     val effect = runtimeInteractiveEffect()
-    val optics = GlassStyle.clearOptics
+    val optics = GlassOptics.clear
     val style = mutableStateOf(effect.style.then { optics(optics) })
     setContent { RuntimeGlassTestContent(effect, tag = "glass", style = style.value) }
     waitForIdle()
@@ -319,6 +851,97 @@ class RuntimeShaderGlassDelegateIntegrationTest : ContextTest() {
   }
 
   @Test
+  fun interactionFramesWithoutDetail_reuseInteractionOutputEffect() = runComposeUiTest {
+    val effect = runtimeInteractiveEffect().apply {
+      style = style.then { optics(optics.copy(refractionDetailIntensity = 0f)) }
+    }
+    setContent { RuntimeGlassTestContent(effect, tag = "glass") }
+    waitForIdle()
+    val delegate = runtime(effect).delegate as RuntimeShaderGlassDelegate
+
+    onNodeWithTag("glass").performTouchInput { down(Offset(20f, 20f)) }
+    mainClock.advanceTimeBy(100)
+    waitForIdle()
+    assertThat(delegate.layers.hasInteractionOptical).isTrue()
+    assertThat(delegate.layers.hasInteractionRefractionDetail).isFalse()
+    val outputEffect = checkNotNull(delegate.interactionOutputEffect)
+
+    repeat(3) { step ->
+      onNodeWithTag("glass").performTouchInput { moveTo(Offset(40f + step * 20f, 50f)) }
+      mainClock.advanceTimeBy(32)
+      waitForIdle()
+    }
+
+    assertThat(delegate.interactionOutputEffect).isSameInstanceAs(outputEffect)
+  }
+
+  @Test
+  fun rawPointerMoves_afterStyleUpdateDuringPress_doNotReRunUpdate() = runComposeUiTest {
+    val effect = runtimeInteractiveEffect()
+    val style = mutableStateOf(effect.style)
+    setContent { RuntimeGlassTestContent(effect, tag = "glass", style = style.value) }
+    waitForIdle()
+
+    onNodeWithTag("glass").performTouchInput { down(Offset(20f, 20f)) }
+    mainClock.advanceTimeBy(100)
+    waitForIdle()
+    // The update re-syncs the controller while the pointer is still at its pressed position.
+    style.value = style.value.then { ambientResponse(0.6f) }
+    waitForIdle()
+
+    val runtime = runtime(effect)
+    runtime.updateCallsForTest = 0
+    repeat(3) { step ->
+      onNodeWithTag("glass").performTouchInput { moveTo(Offset(40f + step * 20f, 50f)) }
+      mainClock.advanceTimeBy(32)
+      waitForIdle()
+    }
+
+    assertThat(runtime.updateCallsForTest).isEqualTo(0)
+  }
+
+  @Test
+  fun animationFrames_afterConfigurationChangeDuringPress_doNotReRunUpdate() = runComposeUiTest {
+    val effect = runtimeInteractiveEffect().apply {
+      style = style.then {
+        pressed {
+          animate(toSpec = tween(1000), fromSpec = tween(1000)) {
+            lightingIntensity(1f)
+            refractionMultiplier(1.08f)
+            whitePointDelta(0.04f)
+          }
+        }
+      }
+    }
+    val style = mutableStateOf(effect.style)
+    setContent { RuntimeGlassTestContent(effect, tag = "glass", style = style.value) }
+    waitForIdle()
+    mainClock.autoAdvance = false
+
+    onNodeWithTag("glass").performTouchInput { down(Offset(20f, 20f)) }
+    repeat(3) { mainClock.advanceTimeByFrame() }
+    // updateConfiguration evaluates renderTopology inside update(); the animation must not make
+    // that read re-run update() after the change.
+    val runtime = runtime(effect)
+    val controller = checkNotNull(runtime.interactionControllerForTest)
+    style.value = style.value.then { interactionPositionAnimationSpec(tween(200)) }
+    mainClock.advanceTimeByFrame()
+
+    // The configuration-change update ran, with the animation still in flight. Count from here: a
+    // read leaked by that update re-runs update() at most once, on the next animation frame.
+    assertThat(controller.configurationForTest.positionAnimationSpec).isEqualTo(tween<Offset>(200))
+    assertThat(controller.hasRunningResponseAnimations).isTrue()
+    runtime.updateCallsForTest = 0
+    repeat(5) { mainClock.advanceTimeByFrame() }
+
+    assertThat(controller.hasRunningResponseAnimations).isTrue()
+    assertThat(runtime.updateCallsForTest).isEqualTo(0)
+    mainClock.autoAdvance = true
+    setContent {}
+    waitForIdle()
+  }
+
+  @Test
   fun interactionOpticalEffect_reusesStableLayerEffectAndUpdatesNewTargets() = runComposeUiTest {
     val effect = runtimeInteractiveEffect()
     val style = mutableStateOf(effect.style)
@@ -375,6 +998,9 @@ class RuntimeShaderGlassDelegateIntegrationTest : ContextTest() {
     val source = checkNotNull(delegate.layers.source)
     val optical = checkNotNull(delegate.layers.optical)
     val detail = checkNotNull(delegate.layers.refractionDetail)
+    val materialSize = checkNotNull(runtime(effect).attachedContextForTest).modifierSize
+    assertThat(materialSize.width).isGreaterThan(1000f)
+    assertThat(materialSize.height).isGreaterThan(600f)
     val decision = runtime(effect).preparedRenderBudget as GlassRenderBudgetDecision.Runtime
     val plannedKinds = checkNotNull(runtime(effect).preparedRender).plan.layers.map { it.kind }
     val positions = listOf(Offset(200f, 150f), Offset(500f, 300f), Offset(800f, 450f))
@@ -498,6 +1124,42 @@ class RuntimeShaderGlassDelegateIntegrationTest : ContextTest() {
   }
 
   @Test
+  fun interactionDetailEnabledMidPress_restoresOpticalLayerEffect() = runComposeUiTest {
+    val effect = runtimeInteractiveEffect()
+    val withoutDetail = effect.style.then { optics(effect.optics.copy(refractionDetailIntensity = 0f)) }
+    val withDetail = effect.style.then { optics(effect.optics.copy(refractionDetailIntensity = 0.5f)) }
+    val style = mutableStateOf(withoutDetail)
+    setContent { RuntimeGlassTestContent(effect, tag = "glass", style = style.value) }
+    waitForIdle()
+
+    runtime(effect).setPressedForTest(Offset(60f, 60f))
+    waitForIdle()
+
+    val delegate = runtime(effect).delegate as RuntimeShaderGlassDelegate
+    val optical = checkNotNull(delegate.layers.interactionOptical)
+    val outputEffect = checkNotNull(optical.renderEffect)
+
+    runtime(effect).setPressedForTest(Offset(60f, 60f))
+    waitForIdle()
+
+    assertThat(optical.renderEffect).isSameInstanceAs(outputEffect)
+
+    style.value = withDetail
+    waitForIdle()
+
+    val composite = checkNotNull(delegate.layers.interactionRefractionComposite)
+    assertThat(composite.renderEffect).isNotNull()
+    assertThat(optical.renderEffect).isNotNull().isNotSameInstanceAs(outputEffect)
+    assertThat(optical.renderEffect).isNotSameInstanceAs(composite.renderEffect)
+    val opticalEffect = optical.renderEffect
+
+    runtime(effect).setPressedForTest(Offset(60f, 60f))
+    waitForIdle()
+
+    assertThat(optical.renderEffect).isSameInstanceAs(opticalEffect)
+  }
+
+  @Test
   fun activeInteractionWithoutPatch_retainsBaseOutput() = runComposeUiTest {
     val effect = runtimeInteractiveEffect()
     setContent { RuntimeGlassTestContent(effect, tag = "glass") }
@@ -533,9 +1195,9 @@ class RuntimeShaderGlassDelegateIntegrationTest : ContextTest() {
       waitForIdle()
 
       val delegate = runtime(effect).delegate as RuntimeShaderGlassDelegate
-      val opticalEffect = delegate.interactionShaderHandle("interactionOpticalEffect")
-      val detailEffect = delegate.interactionShaderHandle("interactionDetailEffect")
-      val lightingEffect = delegate.interactionShaderHandle("interactionLightingEffect")
+      val opticalEffect = checkNotNull(delegate.interactionOptical.shader)
+      val detailEffect = checkNotNull(delegate.interactionDetail.shader)
+      val lightingEffect = checkNotNull(delegate.interactionLighting.shader)
 
       runtime(effect).setPressedForTest(Offset(80f, 60f))
       mainClock.advanceTimeBy(16)
@@ -546,20 +1208,63 @@ class RuntimeShaderGlassDelegateIntegrationTest : ContextTest() {
       }
       waitForIdle()
 
-      assertThat(delegate.interactionShaderHandle("interactionOpticalEffect"))
-        .isSameInstanceAs(opticalEffect)
-      assertThat(delegate.interactionShaderHandle("interactionDetailEffect"))
-        .isSameInstanceAs(detailEffect)
-      assertThat(delegate.interactionShaderHandle("interactionLightingEffect"))
-        .isSameInstanceAs(lightingEffect)
+      assertThat(delegate.interactionOptical.shader).isSameInstanceAs(opticalEffect)
+      assertThat(delegate.interactionDetail.shader).isSameInstanceAs(detailEffect)
+      assertThat(delegate.interactionLighting.shader).isSameInstanceAs(lightingEffect)
 
       assertThat(delegate.rimBrushProvider).isNotNull()
       runtime(effect).onTrimMemory(TrimMemoryLevel.UI_HIDDEN)
       assertThat(delegate.rimBrushProvider).isNull()
-      assertThat(delegate.interactionShaderHandleOrNull("interactionOpticalEffect")).isNull()
-      assertThat(delegate.interactionShaderHandleOrNull("interactionDetailEffect")).isNull()
-      assertThat(delegate.interactionShaderHandleOrNull("interactionLightingEffect")).isNull()
+      assertThat(delegate.interactionOptical.shader).isNull()
+      assertThat(delegate.interactionDetail.shader).isNull()
+      assertThat(delegate.interactionLighting.shader).isNull()
     }
+
+  @Test
+  fun invalidateRetainedOutput_clearsInteractionEffectCachesAndKeepsShaders() = runComposeUiTest {
+    val effect = runtimeInteractiveEffect()
+    setContent { RuntimeGlassTestContent(effect, tag = "glass") }
+    waitForIdle()
+
+    onNodeWithTag("glass").performTouchInput { down(Offset(20f, 20f)) }
+    mainClock.advanceTimeBy(500)
+    waitForIdle()
+
+    val delegate = runtime(effect).delegate as RuntimeShaderGlassDelegate
+    val slots = listOf(
+      delegate.interactionOptical,
+      delegate.interactionDetail,
+      delegate.interactionDetailCoverage,
+      delegate.interactionLighting,
+    )
+    val shaders = slots.map { checkNotNull(it.shader) }
+    slots.forEach { slot ->
+      assertThat(slot.key).isNotNull()
+      assertThat(slot.uniforms).isNotNull()
+      assertThat(slot.platformEffect).isNotNull()
+      assertThat(slot.composeEffect).isNotNull()
+      assertThat(slot.layer).isNotNull()
+    }
+    assertThat(delegate.recordedInteractionOptical.layer).isNotNull()
+    assertThat(delegate.recordedInteractionDetail.layer).isNotNull()
+    assertThat(delegate.recordedInteractionDetailCoverage.layer).isNotNull()
+    assertThat(delegate.interactionOutputEffect).isNotNull()
+
+    delegate.invalidateRetainedOutput()
+
+    slots.forEachIndexed { index, slot ->
+      assertThat(slot.key).isNull()
+      assertThat(slot.uniforms).isNull()
+      assertThat(slot.platformEffect).isNull()
+      assertThat(slot.composeEffect).isNull()
+      assertThat(slot.layer).isNull()
+      assertThat(slot.shader).isSameInstanceAs(shaders[index])
+    }
+    assertThat(delegate.recordedInteractionOptical.layer).isNull()
+    assertThat(delegate.recordedInteractionDetail.layer).isNull()
+    assertThat(delegate.recordedInteractionDetailCoverage.layer).isNull()
+    assertThat(delegate.interactionOutputEffect).isNull()
+  }
 
   @Test
   fun runtimeConstructionFailure_preparesFallbackBeforeContentBehindDecision() = runComposeUiTest {
@@ -1006,6 +1711,29 @@ class RuntimeShaderGlassDelegateIntegrationTest : ContextTest() {
   }
 
   @Test
+  fun createGlassRimBrushProvider_afterRelease_doesNotRecompile() = runComposeUiTest {
+    val effect = animatedStageEffect()
+    setContent { RuntimeForegroundGlassTestContent(effect, style = effect.style) }
+    waitForIdle()
+    val delegate = runtime(effect).delegate as RuntimeShaderGlassDelegate
+    val released = checkNotNull(delegate.rimBrushProvider)
+    assertThat(released).isInstanceOf<SkiaGlassRimBrushProvider>()
+    val compiled = (released as SkiaGlassRimBrushProvider).effect
+
+    runOnIdle {
+      runtime(effect).onTrimMemory(TrimMemoryLevel.UI_HIDDEN)
+      assertThat(delegate.rimBrushProvider).isNull()
+      checkNotNull(effect.attachedContextForTest).invalidateDraw()
+    }
+    waitForIdle()
+
+    val recreated = checkNotNull(delegate.rimBrushProvider)
+    assertThat(recreated).isNotSameInstanceAs(released)
+    assertThat(recreated).isInstanceOf<SkiaGlassRimBrushProvider>()
+    assertThat((recreated as SkiaGlassRimBrushProvider).effect).isSameInstanceAs(compiled)
+  }
+
+  @Test
   fun uniformNativeBlurAndDetailChanges_cacheAndReplaceRenderEffects() = runComposeUiTest {
     val effect = retainedBlurEffect()
     val style = mutableStateOf(effect.style)
@@ -1199,6 +1927,20 @@ class RuntimeShaderGlassDelegateIntegrationTest : ContextTest() {
     interactionReducedMotionPolicy = GlassReducedMotionPolicy.Full
   }
 
+  @Composable
+  private fun SourceBackedGlassTestContent(
+    effect: GlassRuntimeEffect,
+    color: Color = Color.Red,
+    size: Dp = 120.dp,
+    style: GlassStyle = effect.style,
+  ) {
+    val state = remember { HazeState() }
+    Box(Modifier.size(size)) {
+      Box(Modifier.fillMaxSize().hazeSource(state).background(color))
+      Box(Modifier.fillMaxSize().testGlass(effect, input = HazeInput.Sources(state), style = style))
+    }
+  }
+
   private fun animatedStageEffect() = GlassRuntimeEffect().apply {
     style = style.then {
       optics(
@@ -1286,21 +2028,13 @@ class RuntimeShaderGlassDelegateIntegrationTest : ContextTest() {
   )
 
   private class FailingRuntimeShaderGlassDelegate : GlassRuntimeEffect.Delegate {
+    override val usesRuntimeShader: Boolean get() = true
+
     override fun DrawScope.prepareDraw(context: HazeEffectRuntimeDrawScope) = Unit
 
     override fun DrawScope.draw(context: HazeEffectRuntimeDrawScope): Nothing {
       throw RuntimeShaderRenderEffectException(IllegalArgumentException("draw failure"))
     }
-  }
-
-  private fun RuntimeShaderGlassDelegate.interactionShaderHandle(fieldName: String): Any {
-    return checkNotNull(interactionShaderHandleOrNull(fieldName))
-  }
-
-  private fun RuntimeShaderGlassDelegate.interactionShaderHandleOrNull(fieldName: String): Any? {
-    val field = RuntimeShaderGlassDelegate::class.java.getDeclaredField(fieldName)
-    field.isAccessible = true
-    return field.get(this)
   }
 
   @Composable
@@ -1348,7 +2082,16 @@ class RuntimeShaderGlassDelegateIntegrationTest : ContextTest() {
     performanceMode: HazePerformanceMode = HazePerformanceMode.Quality,
   ) {
     val hazeState = remember { HazeState() }
-    Box(Modifier.size(1100.dp, 650.dp)) {
+    Box(
+      Modifier.size(1100.dp, 650.dp).drawWithContent {
+        // These tests verify full-size layer retention and recording, not whole-panel pixels.
+        // Keep the geometry intact, but rasterize a small sample of the current interaction patch.
+        val position = effect.currentInteractionState.position
+        clipRect(position.x - 16f, position.y - 16f, position.x + 16f, position.y + 16f) {
+          this@drawWithContent.drawContent()
+        }
+      },
+    ) {
       Box(Modifier.fillMaxSize().background(Color.Red).hazeSource(hazeState))
       Box(
         Modifier

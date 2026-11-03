@@ -5,6 +5,7 @@ package dev.chrisbanes.haze
 
 import android.content.Intent
 import android.graphics.Point
+import android.graphics.Rect
 import android.os.SystemClock
 import androidx.test.uiautomator.By
 import androidx.test.uiautomator.BySelector
@@ -16,6 +17,7 @@ import androidx.test.uiautomator.UiObject2
 import androidx.test.uiautomator.Until
 import kotlin.math.roundToInt
 import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
 internal const val FORCE_BLUR_EXTRA = "dev.chrisbanes.haze.sample.android.FORCE_BLUR"
@@ -92,7 +94,14 @@ internal fun UiDevice.navigateToCreditCard() {
   waitForIdle()
 }
 
-internal fun UiDevice.waitForBlurProfilingScenario(scenarioId: String) {
+/**
+ * [awaitStableStart] settles the Start button before the click. Pass false from a measured block
+ * that never clicks it, so the wait does not extend the measured window.
+ */
+internal fun UiDevice.waitForBlurProfilingScenario(
+  scenarioId: String,
+  awaitStableStart: Boolean = true,
+) {
   waitForProfilingObject(
     effectName = "Blur",
     scenarioId = scenarioId,
@@ -105,6 +114,7 @@ internal fun UiDevice.waitForBlurProfilingScenario(scenarioId: String) {
     expectedPhase = "ready",
     selector = By.res("blur_profiling_start"),
   )
+  if (awaitStableStart) waitForStableBounds(By.res("blur_profiling_start"))
 }
 
 internal fun UiDevice.runBlurProfilingScenario(scenarioId: String) {
@@ -115,6 +125,7 @@ internal fun UiDevice.runBlurProfilingScenario(scenarioId: String) {
     selector = By.res("blur_profiling_start"),
   ).click()
   SystemClock.sleep(BLUR_PROFILING_MEASURE_MILLIS)
+  requireProfilingComplete(effectName = "Blur", scenarioId = scenarioId, tagPrefix = "blur")
 }
 
 internal fun UiDevice.waitForGlassProduct() = waitForObject(By.res("glass_product_page_0"))
@@ -156,6 +167,7 @@ internal fun UiDevice.waitForGlassProfilingScenario(scenarioId: String) {
     expectedPhase = "ready",
     selector = By.res("glass_profiling_start"),
   )
+  waitForStableBounds(By.res("glass_profiling_start"))
 }
 
 internal fun UiDevice.runGlassProfilingScenario(scenarioId: String) {
@@ -166,6 +178,45 @@ internal fun UiDevice.runGlassProfilingScenario(scenarioId: String) {
     selector = By.res("glass_profiling_start"),
   ).click()
   SystemClock.sleep(GLASS_PROFILING_MEASURE_MILLIS)
+  requireProfilingComplete(effectName = "Glass", scenarioId = scenarioId, tagPrefix = "glass")
+}
+
+/**
+ * The scenario screen animates in after launch, and UI Automator reports the button mid-flight.
+ * Clicking it then lands on the sample list underneath and navigates away. Run from setup so the
+ * wait stays outside the measured window.
+ */
+private fun UiDevice.waitForStableBounds(selector: BySelector, stableFor: Duration = 500.milliseconds) {
+  var last: Rect? = null
+  var since = SystemClock.elapsedRealtime()
+  val deadline = since + 15.seconds.inWholeMilliseconds
+  while (SystemClock.elapsedRealtime() < deadline) {
+    val bounds = findObject(selector)?.visibleBounds
+    val now = SystemClock.elapsedRealtime()
+    if (bounds != last) {
+      last = bounds
+      since = now
+    } else if (bounds != null && now - since >= stableFor.inWholeMilliseconds) {
+      return
+    }
+    SystemClock.sleep(50)
+  }
+  error("Bounds of [$selector] never settled: $last")
+}
+
+/**
+ * Fails the iteration when the scenario never ran, for example because the start click was lost.
+ * Checked after the measured window so it adds no UI Automator work while frames are recorded.
+ * Otherwise the iteration would silently record a static screen with no frames (#1587).
+ */
+private fun UiDevice.requireProfilingComplete(effectName: String, scenarioId: String, tagPrefix: String) {
+  waitForProfilingObject(
+    effectName = effectName,
+    scenarioId = scenarioId,
+    expectedPhase = "complete",
+    selector = By.res("${tagPrefix}_profiling_phase_complete"),
+    timeout = 2.seconds,
+  )
 }
 
 private fun UiDevice.waitForProfilingObject(
@@ -178,7 +229,7 @@ private fun UiDevice.waitForProfilingObject(
   ?: error(
     "$effectName profiling timeout: scenario=$scenarioId, phase=$expectedPhase, " +
       "selector=$selector, timeout=$timeout, visibleNodes=" +
-      findObjects(By.pkg(GLASS_TARGET_PACKAGE))
+      findObjects(By.pkg(TARGET_PACKAGE))
         .map { node ->
           "${node.resourceName}:${node.text}:${node.contentDescription}"
         },

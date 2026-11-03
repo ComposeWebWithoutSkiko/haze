@@ -6,7 +6,8 @@ across supported platforms.
 ## Language
 
 **Glass style**:
-A reusable description of a Glass material's appearance.
+A reusable description of a Glass material's appearance. Its values may depend on observable state,
+so the same Glass style can describe an appearance that changes over time.
 _Avoid_: Material variant
 
 **Built-in Glass style**:
@@ -27,6 +28,16 @@ The sampling response that determines how captured content bends through a Glass
 follow the surface profile or use an edge response authored independently of lighting.
 _Avoid_: Blur profile, lighting profile
 
+**Sampled content**:
+The captured pixels a Glass surface reads through its refraction profile. A pressed Glass surface
+samples the same content whether it draws alone or as part of a Glass cluster.
+_Avoid_: Sampled backdrop
+
+**Press transform**:
+The scale and pivot a pressed Glass surface applies to itself. It scales the surface together with
+its sampled content, as if the whole surface were drawn smaller or larger.
+_Avoid_: Press scale, interaction transform
+
 **Regular Glass style**:
 The default built-in Glass style whose blur and depth adapt to the surface's shortest side while its
 refraction response uses authored constants.
@@ -46,6 +57,28 @@ _Avoid_: Size step, size threshold
 An optical parameter value that is either fixed for every Glass surface size or smoothly
 interpolated across two or more ordered optical size points.
 _Avoid_: Size response, blur profile, adaptive optics
+
+**Glass container**:
+An ancestor that draws its Glass members' surfaces together, so that nearby members can merge into
+one shape and share one optical size. Its merge distance sets how close members must be before they merge.
+_Avoid_: Effect container
+
+**Glass member**:
+A Glass surface that belongs to its nearest Glass container. It keeps its own shape, colours and
+interaction response, unless it is part of a Glass group, which draws with its first member's shape
+and appearance.
+_Avoid_: Child surface, container item
+
+**Glass cluster**:
+Glass members of one container that are close enough and share enough appearance to draw as one
+surface. Their edges stretch towards each other and form smooth bridges as they approach.
+_Avoid_: Union, blob, merged group
+
+**Glass group**:
+Glass members of one container that share a group key and are consecutive in layout order.
+They draw as one Glass shape over their combined bounds, whatever the distance between them. A
+group takes part in a Glass cluster as one member.
+_Avoid_: Glass container, union
 
 **Backdrop input**:
 The `HazeInput.Backdrop` intent to consume all pixels drawn earlier in the same window. A native

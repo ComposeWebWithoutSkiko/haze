@@ -19,6 +19,55 @@ import kotlin.test.Test
 class GlassShadersTest {
 
   @Test
+  fun mergedShaders_reuseMemberDistancesForCoverageAndWeights() {
+    val shaders = mapOf(
+      "fused" to GlassShaders.buildFused(merged = true),
+      "fused-no-detail" to GlassShaders.buildFused(sharpDetail = false, merged = true),
+      "optical" to GlassShaders.buildOptical(merged = true),
+    )
+
+    shaders.forEach { (name, shader) ->
+      val main = shader.substringAfter("vec4 main(vec2 coord) {")
+      assertThat(main.occurrences("memberDistances("), "$name memberDistances").isEqualTo(1)
+      assertThat(main.occurrences("memberWeightsFromDistances("), "$name memberWeights").isEqualTo(1)
+      assertThat(main, name).contains("shapeSdFromDistances(memberDistancesAtCoord)")
+      assertThat(main, name).contains("vec4 w = memberWeightsFromDistances(memberDistancesAtCoord);")
+      assertThat(main, name).doesNotContain("memberWeights(localCoord)")
+      assertThat(main, name).doesNotContain("shapeSd(localCoord)")
+    }
+  }
+
+  @Test
+  fun mergedDetailShaders_evaluateMemberWeightsOncePerMain() {
+    val shaders = mapOf(
+      "detail" to GlassShaders.buildRefractionDetail(merged = true),
+      "detail-coverage" to GlassShaders.buildRefractionDetail(coverageOnly = true, merged = true),
+    )
+
+    shaders.forEach { (name, shader) ->
+      // One definition and one call, which `main` passes down to the helpers.
+      assertThat(shader.occurrences("memberWeights("), "$name memberWeights").isEqualTo(2)
+      assertThat(shader, name).contains("vec4 w = memberWeights(localCoord);")
+    }
+  }
+
+  @Test
+  fun mergedShaders_computeTheEdgeGradientOnlyForStandaloneProfiles() {
+    listOf(
+      GlassShaders.buildFused(merged = true),
+      GlassShaders.buildOptical(merged = true),
+      GlassShaders.buildRefractionDetail(merged = true),
+    ).forEach { shader ->
+      assertThat(shader).doesNotContain("vec2 gradient = edgeRefractionGradient(")
+      assertThat(shader).contains("gradient = shapeRefractionGradient(localCoord);")
+      assertThat(shader).contains("} else {\n          gradient = edgeRefractionGradient(localCoord, size, radii);")
+    }
+    assertThat(GlassShaders.buildOptical()).contains("vec2 gradient = edgeRefractionGradient(localCoord, size, radii);")
+  }
+
+  private fun String.occurrences(needle: String): Int = windowed(needle.length).count { it == needle }
+
+  @Test
   fun fusedShader_preservesZeroExponentFresnelResponse() {
     val shader = GlassShaders.buildFused()
 
@@ -347,7 +396,7 @@ class GlassShadersTest {
         "if (refractionFoldStrength <= 0.0) return heightNorm;",
       )
       assertThat(shader).contains(
-        "edgeRefractionWidth >= 0.0 ? edgeRefractionWidth : refractionHeight, sampleStep",
+        "edgeRefractionWidth >= 0.0 ? edgeRefractionWidth : height, sampleStep",
       )
       assertThat(shader).contains("float foldT = clamp(opticalDistance / foldWidth, 0.0, 1.0);")
       assertThat(shader).contains(
@@ -393,8 +442,8 @@ class GlassShadersTest {
       assertThat(shader).contains(
         "vec2 gradSdRectangle(vec2 localCoord, vec2 size, float blendWidth)",
       )
-      assertThat(shader).contains("float normalBlendWidth = max(refractionHeight, 1.0);")
-      assertThat(shader).contains("vec2 boundaryGradient = gradSdRoundedRect(")
+      assertThat(shader).contains("vec2 boundary = gradSdRoundedRect(p, size, radii, max(height, 1.0));")
+      assertThat(shader).contains("vec2 boundary = gradSdRoundedRect(")
       assertThat(shader).contains("vec2 gradSdRoundedRect(")
       assertThat(shader).contains(
         "vec2 rectangleGradient = gradSdRectangle(localCoord, size, blendWidth);",
@@ -423,20 +472,14 @@ class GlassShadersTest {
       GlassShaders.buildOptical(),
       GlassShaders.buildRefractionDetail(),
     ).forEach { shader ->
-      assertThat(shader).contains("float elongationWeight()")
+      assertThat(shader).contains("float opticalFieldWeight(vec2 size, float height)")
       assertThat(shader).contains("float opticalFieldWeight()")
-      assertThat(shader).contains("refractionHeight / inradius - 0.75")
-      assertThat(shader).contains("float domeRadius(vec2 normalizedCoord)")
-      assertThat(shader).contains(
-        "squaredCoord.x + squaredCoord.y - squaredCoord.x * squaredCoord.y",
-      )
-      assertThat(shader).contains(
-        "return mix(distToEdge, distanceFromDome, fieldWeight);",
-      )
-      assertThat(shader).contains("if (fieldWeight <= 0.0) return distToEdge;")
-      assertThat(shader).contains("if (fieldWeight >= 1.0) return distanceFromDome;")
-      assertThat(shader).contains("vec2 opticalSurfaceGradient(vec2 localCoord, float fieldWeight)")
-      assertThat(shader).contains("if (fieldWeight <= 0.0) return boundaryGradient;")
+      assertThat(shader).contains("height / (shortestSide * 0.5) - 0.75")
+      assertThat(shader).contains("squared.x + squared.y - squared.x * squared.y")
+      assertThat(shader).contains("return mix(edge, domeDistance(p, size, height), weight);")
+      assertThat(shader).contains("if (weight <= 0.0) return edge;")
+      assertThat(shader).contains("vec2 rectOpticalGradient(")
+      assertThat(shader).contains("if (weight >= 1.0) return dome;")
       assertThat(shader).contains("if (fieldWeight < 1.0) {")
       assertThat(shader).contains(
         "displacementGradient = mix(normalizedGradient, opticalGradient, fieldWeight);",
@@ -467,7 +510,7 @@ class GlassShadersTest {
 
     listOf(fused, optical).forEach { shader ->
       assertThat(shader)
-        .contains("vec2 surfaceLightingGradient(vec2 localCoord, float sd, float fieldWeight)")
+        .contains("vec2 surfaceLightingGradient(vec2 p, float sd, float weight)")
       assertThat(shader).contains("float lightingSlope = 2.0 * (1.0 - smootherstep(t));")
       assertThat(shader).contains("return surfaceGradient(localCoord, fieldWeight);")
     }
@@ -712,24 +755,12 @@ class GlassShadersTest {
       GlassShaders.buildRefractionDetail(),
       GlassShaders.buildRefractionDetail(interactive = true),
     ).forEach { shader ->
-      val surfaceHeightAt = shader.substringAfter("float surfaceHeightAt(")
+      val rectHeight = shader.substringAfter("float rectSurfaceHeight(")
         .substringBefore("float surfaceHeight(")
-      assertThat(shader).contains(
-        "float surfaceHeightAt(vec2 localCoord, vec4 customRadii, float fieldWeight)",
-      )
-      assertThat(shader).contains(
-        "return surfaceHeightFromOpticalDistance(domeDistance(localCoord));",
-      )
-      assertThat(surfaceHeightAt.indexOf("if (fieldWeight >= 1.0) {"))
-        .isLessThan(
-          surfaceHeightAt.indexOf(
-            "float sd = sdRoundedRect(localCoord, materialSize, customRadii);",
-          ),
-        )
-      assertThat(shader).contains(
-        "float sd = sdRoundedRect(localCoord, materialSize, customRadii);",
-      )
-      assertThat(shader).contains("vec2 boundaryGradient = gradSdRoundedRect(")
+      assertThat(rectHeight.indexOf("if (weight >= 1.0) return"))
+        .isLessThan(rectHeight.indexOf("float sd = sdRoundedRect(p, size, radii);"))
+      assertThat(shader).contains("float sd = sdRoundedRect(p, size, radii);")
+      assertThat(shader).contains("vec2 boundary = gradSdRoundedRect(")
       assertThat(shader).contains("vec2 gradSdRoundedRect(")
       assertThat(shader).doesNotContain("min(smoothRadius, min(halfSize.x, halfSize.y))")
     }
@@ -750,6 +781,41 @@ class GlassShadersTest {
     assertThat(GlassShaders.buildFused()).contains("layout(color) uniform vec4 tintColor;")
     assertThat(GlassShaders.buildOptical()).contains("layout(color) uniform vec4 tintColor;")
     assertThat(GlassShaders.buildRim()).contains("layout(color) uniform vec4 edgeShadow;")
+  }
+
+  @Test
+  fun mergedSources_declareMemberArraysAndUseSdfForMergedResponse() {
+    listOf(
+      GlassShaders.buildFused(merged = true),
+      GlassShaders.buildFused(sharpDetail = false, merged = true),
+      GlassShaders.buildOptical(merged = true),
+      GlassShaders.buildRefractionDetail(merged = true),
+      GlassShaders.buildRefractionDetail(coverageOnly = true, merged = true),
+      GlassShaders.buildRim(merged = true),
+    ).forEach { shader ->
+      assertThat(shader).contains("uniform float4 memberRects[4];")
+      assertThat(shader).contains("uniform float4 memberRadii[4];")
+      assertThat(shader).doesNotContain("= opticalFieldWeight()")
+    }
+    assertThat(GlassShaders.buildOptical(merged = true)).contains("layout(color) uniform vec4 memberTint3;")
+    assertThat(GlassShaders.buildMergedBackground()).contains("layout(color) uniform vec4 memberBackground3;")
+  }
+
+  @Test
+  fun singleSurfaceSources_haveNoMemberIdentifiers() {
+    listOf(
+      GlassShaders.buildFused(),
+      GlassShaders.buildFused(sharpDetail = false),
+      GlassShaders.buildFused(interactionOptics = true),
+      GlassShaders.buildFused(interactionOptics = true, sharpDetail = false),
+      GlassShaders.buildOptical(),
+      GlassShaders.buildOptical(interactive = true),
+      GlassShaders.buildRefractionDetail(),
+      GlassShaders.buildRefractionDetail(coverageOnly = true),
+      GlassShaders.buildRefractionDetail(interactive = true),
+      GlassShaders.buildRefractionDetail(interactive = true, coverageOnly = true),
+      GlassShaders.buildRim(),
+    ).forEach { shader -> assertThat(shader).doesNotContain("member") }
   }
 
   private class RecordingUniformProvider : RuntimeShaderUniformProvider {
@@ -775,6 +841,10 @@ class GlassShadersTest {
       value4: Float,
     ) {
       values[name] = listOf(value1, value2, value3, value4)
+    }
+
+    override fun setFloatUniform(name: String, values: FloatArray) {
+      this.values[name] = values.toList()
     }
 
     override fun setIntUniform(name: String, value: Int) = error("Unexpected int uniform: $name")

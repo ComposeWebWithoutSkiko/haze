@@ -8,6 +8,8 @@ import androidx.compose.ui.graphics.layer.GraphicsLayer
 import dev.chrisbanes.haze.HazeEffectRuntimeDrawScope
 import dev.chrisbanes.haze.HazeProgressive
 
+internal actual fun BlurVisualEffect.invalidateRenderEffectOnInputChange() = Unit
+
 internal actual fun RenderEffectBlurVisualEffectDelegate.drawProgressiveEffect(
   drawScope: DrawScope,
   progressive: HazeProgressive,

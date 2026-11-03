@@ -4,6 +4,13 @@ package dev.chrisbanes.haze {
   @kotlin.RequiresOptIn(message="Experimental Haze API", level=kotlin.RequiresOptIn.Level.WARNING) public @interface ExperimentalHazeApi {
   }
 
+  @dev.chrisbanes.haze.InternalHazeApi public final class HazeConfiguredEffectSurface<Style> {
+    method public void dispose();
+    method @InaccessibleFromKotlin public dev.chrisbanes.haze.HazeEffectSurface getSurface();
+    method public void update(Style style, androidx.compose.ui.geometry.Rect bounds, java.util.List<dev.chrisbanes.haze.HazeEffectSurface> members);
+    property public dev.chrisbanes.haze.HazeEffectSurface surface;
+  }
+
   @dev.chrisbanes.haze.InternalHazeApi public final class HazeEffectBackdrop {
     ctor public HazeEffectBackdrop(PlatformRenderEffect platformEffect, optional float alpha, optional dev.chrisbanes.haze.HazeEffectContentTransform materialTransform);
     method @InaccessibleFromKotlin public float getAlpha();
@@ -42,6 +49,11 @@ package dev.chrisbanes.haze {
   }
 
   public final class HazeEffectFactoryKt {
+    method @KotlinOnly @dev.chrisbanes.haze.InternalHazeApi public static androidx.compose.ui.graphics.layer.GraphicsLayer? createScaledContentLayer(androidx.compose.ui.graphics.drawscope.DrawScope, dev.chrisbanes.haze.HazeEffectRuntimeDrawScope context, androidx.compose.ui.graphics.Color backgroundColor, float scaleFactor, androidx.compose.ui.geometry.Size layerSize, optional androidx.compose.ui.graphics.layer.GraphicsLayer? existingLayer, optional kotlin.jvm.functions.Function0<androidx.compose.ui.graphics.Shader?>? backgroundShader, optional boolean fillCapture);
+    method @KotlinOnly @dev.chrisbanes.haze.InternalHazeApi public static void drawScaledContent(androidx.compose.ui.graphics.drawscope.DrawScope, androidx.compose.ui.geometry.Offset offset, androidx.compose.ui.geometry.Size scaledSize, optional boolean clip, kotlin.jvm.functions.Function1<androidx.compose.ui.graphics.drawscope.DrawScope,kotlin.Unit> block);
+    method @KotlinOnly @dev.chrisbanes.haze.InternalHazeApi public static void drawScaledContent(androidx.compose.ui.graphics.drawscope.DrawScope, androidx.compose.ui.geometry.Offset offset, androidx.compose.ui.layout.ScaleFactor captureScale, optional boolean clip, kotlin.jvm.functions.Function1<androidx.compose.ui.graphics.drawscope.DrawScope,kotlin.Unit> block);
+    method @KotlinOnly @dev.chrisbanes.haze.InternalHazeApi public static androidx.compose.ui.layout.ScaleFactor scaledContentScale(androidx.compose.ui.geometry.Size layerSize, float scaleFactor);
+    method @KotlinOnly @dev.chrisbanes.haze.InternalHazeApi public static inline void translate(androidx.compose.ui.graphics.drawscope.DrawScope, androidx.compose.ui.geometry.Offset offset, kotlin.jvm.functions.Function1<androidx.compose.ui.graphics.drawscope.DrawScope,kotlin.Unit> block);
     method @dev.chrisbanes.haze.InternalHazeApi public static inline <R> R withGraphicsLayer(dev.chrisbanes.haze.HazeEffectRuntimeDrawScope, kotlin.jvm.functions.Function1<? super androidx.compose.ui.graphics.layer.GraphicsLayer,? extends R> block);
   }
 
@@ -61,6 +73,7 @@ package dev.chrisbanes.haze {
   @dev.chrisbanes.haze.InternalHazeApi public interface HazeEffectLifecycleScope {
     method public <T> T currentValueOf(androidx.compose.runtime.CompositionLocal<T> local);
     method @InaccessibleFromKotlin public kotlinx.coroutines.CoroutineScope getCoroutineScope();
+    method @InaccessibleFromKotlin public default dev.chrisbanes.haze.HazeEffectSurface getSurface();
     method public void invalidateDraw();
     method public void invalidateLayerBounds();
     method public androidx.compose.ui.unit.Density requireDensity();
@@ -68,6 +81,7 @@ package dev.chrisbanes.haze {
     method public dev.chrisbanes.haze.PlatformContext requirePlatformContext();
     property public abstract kotlinx.coroutines.CoroutineScope coroutineScope;
     property public abstract androidx.compose.ui.geometry.Size modifierSize;
+    property public default dev.chrisbanes.haze.HazeEffectSurface surface;
   }
 
   public interface HazeEffectRenderer<Style> {
@@ -128,6 +142,26 @@ package dev.chrisbanes.haze {
     property public abstract androidx.compose.ui.geometry.Size modifierSize;
   }
 
+  @dev.chrisbanes.haze.InternalHazeApi public final class HazeEffectSurface {
+    method public androidx.compose.ui.geometry.Rect? boundsInOwner();
+    method public <Style> dev.chrisbanes.haze.HazeConfiguredEffectSurface<Style> createConfiguredSurface(dev.chrisbanes.haze.HazeEffectFactory<Style> factory, Style style, androidx.compose.ui.geometry.Rect bounds, java.util.List<dev.chrisbanes.haze.HazeEffectSurface> members, optional boolean drawsMembersOnDecline);
+    method public java.util.Set<java.lang.Object> inputSelection();
+    method public void relocateTo(dev.chrisbanes.haze.HazeEffectSurfaceOwner? owner);
+  }
+
+  public final class HazeEffectSurfaceKt {
+    method @dev.chrisbanes.haze.InternalHazeApi public static void drawHazeEffectSurfaces(androidx.compose.ui.graphics.drawscope.ContentDrawScope, dev.chrisbanes.haze.HazeEffectSurfaceOwner owner, kotlin.jvm.functions.Function0<? extends java.util.List<dev.chrisbanes.haze.HazeEffectSurface>> surfaces, androidx.compose.ui.graphics.layer.GraphicsLayer children);
+  }
+
+  @dev.chrisbanes.haze.InternalHazeApi public interface HazeEffectSurfaceOwner {
+    method public boolean canComposeNativeSurfaces(androidx.compose.ui.geometry.Rect bounds);
+    method @InaccessibleFromKotlin public androidx.compose.ui.layout.LayoutCoordinates? getSurfaceCoordinates();
+    method public void onSurfaceChanged(dev.chrisbanes.haze.HazeEffectSurface surface);
+    method public default void onSurfacePlacementChanged(dev.chrisbanes.haze.HazeEffectSurface surface);
+    method public void onSurfaceReleased(dev.chrisbanes.haze.HazeEffectSurface surface);
+    property public abstract androidx.compose.ui.layout.LayoutCoordinates? surfaceCoordinates;
+  }
+
   @dev.chrisbanes.haze.ExperimentalHazeApi public final class HazeFeatureFlags {
     property public boolean isPlatformBackdropEnabled;
     field public static final dev.chrisbanes.haze.HazeFeatureFlags INSTANCE;
@@ -164,14 +198,21 @@ package dev.chrisbanes.haze {
     property public dev.chrisbanes.haze.HazeState state;
   }
 
+  @dev.chrisbanes.haze.ExperimentalHazeApi public enum HazeInputSharing {
+    enum_constant public static final dev.chrisbanes.haze.HazeInputSharing Always;
+    enum_constant public static final dev.chrisbanes.haze.HazeInputSharing Auto;
+    enum_constant public static final dev.chrisbanes.haze.HazeInputSharing Never;
+  }
+
   public final class HazeKt {
     method @androidx.compose.runtime.Stable public static androidx.compose.ui.Modifier hazeSource(androidx.compose.ui.Modifier, dev.chrisbanes.haze.HazeState state, optional float zIndex, optional Object? key);
+    method @androidx.compose.runtime.Stable @dev.chrisbanes.haze.ExperimentalHazeApi public static androidx.compose.ui.Modifier hazeSource(androidx.compose.ui.Modifier, dev.chrisbanes.haze.HazeState state, optional float zIndex, optional Object? key, dev.chrisbanes.haze.HazeInputSharing inputSharing, optional androidx.compose.ui.graphics.LayerOutsets inputSharingOutsets);
     method @KotlinOnly @androidx.compose.runtime.Composable public static dev.chrisbanes.haze.HazeState rememberHazeState();
   }
 
   public final class HazeLogger {
-    method @dev.chrisbanes.haze.InternalHazeApi public void d(String tag, Throwable? throwable, kotlin.jvm.functions.Function0<java.lang.String> message);
-    method @dev.chrisbanes.haze.InternalHazeApi public void d(String tag, kotlin.jvm.functions.Function0<java.lang.String> message);
+    method @dev.chrisbanes.haze.InternalHazeApi public inline void d(String tag, Throwable? throwable, kotlin.jvm.functions.Function0<java.lang.String> message);
+    method @dev.chrisbanes.haze.InternalHazeApi public inline void d(String tag, kotlin.jvm.functions.Function0<java.lang.String> message);
     method @InaccessibleFromKotlin public boolean getEnabled();
     method @InaccessibleFromKotlin public void setEnabled(boolean);
     property public boolean enabled;

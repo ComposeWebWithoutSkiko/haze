@@ -9,8 +9,13 @@ see the [performance guide](../../docs/performance.md); published historical mea
 | Task | Start here |
 | --- | --- |
 | Compare Blur and Glass performance modes | [Calibration matrix](#calibration-matrix) |
+| Observe combined Blur noise/tint reconstruction | [Noise/tint construction](#noisetint-construction) |
 | Diagnose one controlled scenario or run Gallery journeys | [Run a profile](#run-a-profile) |
+| Compare a merged Glass cluster with independent surfaces | [Glass container comparison](#glass-container-comparison) |
+| Compare container reclustering cost while a lazy grid scrolls | [Lazy container scroll workload](#lazy-container-scroll-workload) |
+| Compare resting gap, join/leave, group, press, lazy-independent or cold container workloads | [Animated container workloads](#animated-container-workloads) |
 | Compare source and native backdrop paths | [Android 37.2 comparisons](#android-372-sourcebackdrop-comparisons) |
+| Compare unshared, feed-only and nested input sharing | [Nested input-sharing comparison](#nested-input-sharing-comparison) |
 | Find artifacts and interpret metrics or traces | [Results](#results) |
 | Generate and verify library baseline profiles | [Baseline-profile maintenance](BASELINE_PROFILES.md) |
 
@@ -89,10 +94,40 @@ progressive mask. `steadyFullChroma` and `steadyFullChroma9` retain the regular 
 set Full chromatic aberration with a non-zero `0.3` strength. Other style groups remain at their
 defaults.
 
-The progressive, Full chroma, interaction-update, and source-update scenarios each have one- and
-nine-effect variants. `source_update_quality`, `source_update_balanced`, and
+The `resize_quality` and `resize_quality_9` workloads keep their source pixels stationary while
+resizing the outer Glass grid's layout bounds from 196×126 dp to 280×180 dp and back. Each runs
+three linear grow-and-shrink cycles during the existing three-second measurement window. The
+one-effect and nine-effect variants use `HazeInput.Sources`, `Quality`, Regular style, and retain the
+same effect nodes throughout the run; the changing bounds come from layout size, not a graphics
+transform.
+
+The `shape_update_balanced` and `shape_update_balanced_9` workloads use the same layout-bounds
+resize as `resize_quality`, with `Balanced`, `HazeInput.Sources`, Regular style with default
+presentation, and a stationary source. All four corner radii move in phase with the size, from a pill
+(63 dp, or 21 dp per cell with nine effects) at the smallest size to 24 dp (8 dp per cell) at the
+largest. Each effect keeps one remembered style whose block reads the animated radius from state,
+so the node re-evaluates the style each frame without rebuilding it (ADR-0011). The resize still
+recomposes the scene each frame, as in `resize_quality`. Earlier results in which the style was
+rebuilt every frame (before #1427) are not directly comparable. Run them with
+`GlassProfilingBenchmark#shapeUpdateBalanced` and `#shapeUpdateBalanced9`; the benchmark launches each
+directly through its intent extra.
+
+The progressive, Full chroma, interaction-update, shape-update, and source-update scenarios each
+have one- and nine-effect variants. `source_update_quality`, `source_update_balanced`, and
 `source_update_performance` are the controlled changing-input
 calibration rows. The default steady scenario additionally has a three-effect variant.
+
+### Source-scroll workloads
+
+The source-scroll workloads move only the source. `source_scroll_balanced` and
+`source_scroll_balanced_9` exist for both Blur (`BenchmarkTest#blurSourceScrollBalanced` and
+`#blurSourceScrollBalanced9`) and Glass (`GlassProfilingBenchmark#sourceScrollBalanced` and
+`#sourceScrollBalanced9`). Each offsets a full-size source vertically from 0 to 48 dp and back,
+three times over the three-second window. The offset is read only during placement, so the source
+is re-placed without recomposition. The one or nine `Balanced` effects keep a fixed size, position,
+and style, and the source pixels themselves do not change. The workload isolates the cost of an
+effect following its source's geometry (#1456). Run the comparison with
+[Run the source-scroll comparison](#run-the-source-scroll-comparison).
 
 ### Fixed-quality sweep
 
@@ -106,6 +141,146 @@ count.
 The input levels are benchmark labels. Interpret their resolution using the Glass implementation
 under test and preserve its build identity with the result. The sweep does not establish a public
 minimum-resolution guarantee.
+
+### Glass container comparison
+
+The `source_update_independent_2` and `source_update_container_2` workloads compare two Glass
+surfaces drawn independently with the same two surfaces in one Glass cluster. They share every
+parameter except the container:
+
+- two surfaces 12 dp apart in the 280×180 dp grid, each about 134×180 dp;
+- `HazePerformanceMode.Default` (`Balanced`), `HazeInput.Sources`, and the Regular style;
+- the continuously changing source workload used by `source_update_balanced`.
+
+`source_update_container_2` wraps the grid in `hazeGlassContainer(mergeDistance = 32.dp)`. Members
+join one cluster when the gap between them is below the merge distance, so the two surfaces form one
+two-member cluster. Within a cluster, the shader bridges members while their gap is below half the
+merge distance, and a member's standalone weight stays 0 until its nearest gap passes half the merge
+distance. The 12 dp gap is below half of 32 dp, so this pair sits in the weight-0 case. Resting gaps
+between half and the full merge distance take a different shader path, which
+[Animated container workloads](#animated-container-workloads) covers.
+
+Both use the changing-source workload, not the steady one. `HazeSource.record` re-records the same
+source layer every frame, but that does not re-enter the Glass draw: the Glass layers were recorded
+once, and HWUI re-renders them on the RenderThread each frame. `hazeGlassRuntimeDrawCount` (the
+`HazeGlass.runtimeDraw` marker) therefore counts UI-thread recording, not rendered frames. It is
+1-2 per iteration in both rows, and only confirms that the modern runtime delegate was selected.
+
+The per-frame signal is HWUI's `drawLayer [graphicsLayer] <width> x <height>` slice, which marks
+each damaged offscreen layer that is re-rendered. The benchmark records it as
+`graphicsLayerDrawCount`, next to `hazeSourceRecordCount`. Divide each by `frameCount` for the same
+iteration:
+
+| Row | `graphicsLayerDrawCount` per frame | `hazeSourceRecordCount` per frame | `hazeGlassRuntimeDrawCount` |
+| --- | --- | --- | --- |
+| `source_update_independent_2` | 1.8-2.2 (two layers) | 0.9-1.1 | at least 1 every iteration |
+| `source_update_container_2` | 0.9-1.1 (one cluster layer) | 0.9-1.1 | at least 1 every iteration |
+
+The slice is named by the platform and counts any offscreen Compose layer, so the bands are
+row-specific. They also detect a cluster that failed to form: a container row that shows two layers
+per frame does not exercise the cluster, and the comparison is invalid. `archive_result.py` enforces
+these bands with `--per-frame` and `--positive`, and fails any archive in which a single-value
+metric has fewer runs than iterations or an iteration recorded fewer than `--min-frames` frames
+(a missing `frameCount` also fails; default 1; `--min-frames 0` disables the floor).
+
+CPU frame time does not measure GPU shader cost. Compare the container row's layer, which covers
+both members and the bridge between them, with the two independent layers using peak GPU memory and
+system GPU data alongside CPU frame duration.
+
+#### Lazy container scroll workload
+
+`lazy_container_scroll` measures the CPU cost of a Glass container whose members move every frame
+(#1567). It runs as `GlassProfilingBenchmark#lazyContainerScroll`:
+
+- a fixed 360×560 dp `LazyVerticalGrid` of five columns, with 56 dp tall members 12 dp apart, shows
+  about nine rows, so 40-45 members are visible;
+- the grid is `hazeGlassContainer(mergeDistance = 16.dp, scrollState = gridState)`. The 12 dp gap
+  joins the visible grid into one connected component. Its first four members in layout order share
+  a capped merged field; the remaining members draw as relocated singletons. The workload measures
+  reclustering and relocation for many singletons, rather than a grid of four-member merged fields;
+  `lazy_independent_scroll` is the like-for-like pair without a container. Before #1567, every member
+  notification reclustered all members. Each pass checked on the order of the member count squared
+  in pairs, so the one notification per member in a frame cost on the order of the member count
+  cubed;
+- there are 1,000 items, scrolled linearly by 1,200 dp over the three-second window inside
+  `gridState.scroll { }`, so `isScrollInProgress` is true, as it is for a real drag;
+- `HazeInput.Sources` over the scene's stationary source, the Regular style and `Balanced`.
+- Both lazy variants use an outer `clipToBounds()` before the container, matching the documented
+  lazy-layout setup. Without it, relocated Glass shades beyond the viewport while independent
+  Glass is clipped by the lazy layout. Record this clip configuration with results: changing it
+  changes visible coverage and must not be attributed to a library optimization.
+
+The row records frame timing, frame overrun and peak memory. It has no per-frame layer gate: the
+layer count follows the visible members and how they cluster. Compare it across builds only, with
+[Run the lazy container scroll comparison](#run-the-lazy-container-scroll-comparison).
+
+#### Animated container workloads
+
+These six scenarios extend the container comparison. Each runs through the existing
+`glass-profiling` route and the `BENCHMARK_SCENARIO` extra, and is a method of
+`GlassProfilingBenchmark`. The first four use the changing-source workload of
+`source_update_container_2`, so each differs from that control in one variable. The animated
+scenarios attach their Glass before the measured window, so they exclude first-effect
+initialization. Only `effect_attach_container_2` measures it.
+
+| Scenario | Method | Geometry and variable | Per-frame gate | Pairs with |
+| --- | --- | --- | --- | --- |
+| `container_gap_2` | `containerGap2` | Two members with a 24 dp resting gap, between half (16 dp) and the full 32 dp merge distance, so each keeps a standalone weight above 0 | `graphicsLayerDrawCount` 0.9-1.1 | `source_update_container_2` |
+| `container_join_leave` | `containerJoinLeave` | Four fixed 60×120 dp slots 12 dp apart; the member count steps 2, 3, 4, 3, 2, 3, one change every half second, with `GlassReducedMotionPolicy.Reduced` so the morph runs at any animation scale | none: membership varies | `source_update_container_2` |
+| `container_group_3` | `containerGroup3` | Three members 48 dp apart, beyond the merge distance, sharing one `groupKey` | `graphicsLayerDrawCount` 0.9-1.1 | `source_update_container_2` |
+| `container_press_2` | `containerPress2` | The `container_2` geometry; the first member is pressed and released three times, the second has no interaction source | `graphicsLayerDrawCount` 0.9-1.1 | `source_update_container_2` |
+| `lazy_independent_scroll` | `lazyIndependentScroll` | The `lazy_container_scroll` grid with independent Glass members and no container | none: one layer per visible member | `lazy_container_scroll` |
+| `effect_attach_container_2` | `effectAttachContainer2` | The two-member container attached at the start of the measured window | none: cold initialization | `effect_attach` (one member, no container) |
+
+The gates are provisional. A dry run writes only XML and cannot check them, so run a gated
+diagnostic on a device and confirm them before measuring. Add each of the first four methods to the
+diagnostic loop's `for method in` list and to `pass_one` and `pass_two` in
+[Run the Glass container comparison](#run-the-glass-container-comparison); `gates_for` supplies its
+gates. The last two take no gates, like `lazy_container_scroll` and
+`effect_attach`; run them in a loop with `gates=()`, as in the lazy container loop. Check a dry run
+once per method, as described in [Validate automation](#validate-automation). Never publish a
+dry-run result as a measurement.
+
+## Noise/tint construction
+
+`BlurNoiseTintBenchmark` measures the Android combined noise-and-single-SrcOver-tint path.
+The sample picker and benchmark intents select the same `noise_tint_*` scenarios. All use a
+stationary checker source, Quality/full-resolution filtering, and a constant total visible area
+of 240 × 180 dp, split across one or three independently configured nodes.
+
+Run these methods individually: `stable1`, `stable3`, `tint1`, `tint3`, `radius1`, `radius3`,
+`noise1`, `noise3`, `cold1`, and `cold3`. Warm methods settle before starting a three-second
+draw/animation window; changing methods animate only their named property. Cold methods launch
+inside `measureBlock`, capturing first construction in a fresh process. They do not establish
+a cold GPU driver or disk cache. Direct profiling launches skip unrelated image prefetching.
+
+```shell
+./gradlew :internal:benchmark:connectedBenchmarkReleaseAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=dev.chrisbanes.haze.BlurNoiseTintBenchmark#tint3 \
+  -Pandroid.testInstrumentationRunnerArguments.haze.targetSha256="$noise_tint_target_sha256" \
+  -Pandroid.testInstrumentationRunnerArguments.haze.benchmarkSha256="$noise_tint_benchmark_sha256" \
+  --no-scan
+python3 internal/benchmark/archive_result.py \
+  --method 'dev.chrisbanes.haze.BlurNoiseTintBenchmark#tint3' \
+  --destination "$noise_tint_archive/baseline-forward/tint3"
+```
+
+Follow device preparation and cleanup above, and qualify every method with the dry-run argument
+below first. Save the XML from dry runs; they are automation checks, not measured results.
+Measured archives must retain eight traces per method before another invocation replaces outputs.
+Save frozen target/benchmark APKs and their SHA-256 hashes, source identities, run order, and
+before/after thermal and refresh readbacks alongside the archives. Compare baseline then candidate,
+and candidate then baseline, using the same APKs and device settings.
+The two `haze.*Sha256` arguments require the frozen hashes; the benchmark checks the installed APKs
+before measurement. Dry runs may omit these arguments.
+
+`HazeRuntimeShader.construct` surrounds actual native construction. Attribute it to the nested
+`HazeBlur.combinedNoiseTint` section and the target process; a factory call alone does not prove
+construction. `analyze_noise_tint.py` verifies these markers, measured windows, scheduler evidence,
+archive completeness, and frozen APK identities. The complete four-pass session is checked with
+`--session "$noise_tint_archive" --expect-shared`; `--pass baseline-forward` checks the baseline
+before reuse is implemented. Constructor duration is CPU-side native construction, not total
+backend/GPU compilation cost. Report CPU frame timing and scheduler placement separately.
 
 ## Validate automation
 
@@ -171,6 +346,109 @@ done
 )
 ```
 
+## Run the source-scroll comparison
+
+This gate compares two builds: build A, the commit that adds the source-scroll scenarios without a
+library change, and build B, the change under test. Create a worktree at each, prepare the device
+as described above, and use eight measured iterations.
+
+First dry-run every method once in each worktree, one invocation per method, and check that each
+XML result names its method:
+
+```shell
+./gradlew --no-scan :internal:benchmark:connectedBenchmarkReleaseAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.androidx.benchmark.dryRunMode.enable=true \
+  -Pandroid.testInstrumentationRunnerArguments.class=dev.chrisbanes.haze.BenchmarkTest#blurSourceScrollBalanced
+```
+
+Then run this loop in each worktree, in the order A, B, then B, A. The last four methods are guards:
+the source-update and list workloads should not regress beyond single-pass uncertainty.
+
+```bash
+(
+set -e
+trap 'adb shell cmd power set-fixed-performance-mode-enabled false' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+adb shell cmd power set-fixed-performance-mode-enabled true
+mkdir -p internal/benchmark/build/benchmark-results
+results_dir=$(mktemp -d internal/benchmark/build/benchmark-results/source-scroll.XXXXXX)
+echo "Results: $results_dir"
+methods=(
+  "BenchmarkTest#blurSourceScrollBalanced"
+  "BenchmarkTest#blurSourceScrollBalanced9"
+  "GlassProfilingBenchmark#sourceScrollBalanced"
+  "GlassProfilingBenchmark#sourceScrollBalanced9"
+  "BenchmarkTest#blurSourceUpdateBalanced"
+  "GlassProfilingBenchmark#sourceUpdateBalanced"
+  "GlassProfilingBenchmark#sourceUpdate9"
+  "BenchmarkTest#imagesList"
+)
+for method in "${methods[@]}"; do
+  ./gradlew --no-scan :internal:benchmark:connectedBenchmarkReleaseAndroidTest \
+    -Pandroid.testInstrumentationRunnerArguments.class="dev.chrisbanes.haze.${method}"
+  python3 internal/benchmark/archive_result.py \
+    --method "dev.chrisbanes.haze.${method}" \
+    --destination "$results_dir/$method"
+done
+)
+```
+
+Copy each archive out of its worktree before the next build replaces outputs. Record the device
+model and build, refresh rate, thermal and battery state, both builds' SHAs and APK SHA-256 hashes,
+and the run order. Before attributing an apparent guard regression to the code, report its
+per-iteration CPU placement as described in
+[Check CPU placement before attributing a regression](#check-cpu-placement-before-attributing-a-regression).
+
+## Run the lazy container scroll comparison
+
+The maintainer performs this comparison on a physical device. It compares build A, the commit that
+adds `lazy_container_scroll` without a library change, with build B, the change under test. Create a
+worktree at each, prepare the device as described above, and use eight measured iterations. Do not
+add results here; they go in the Glass containers section of
+[benchmark results](../../docs/benchmark-results.md).
+
+First dry-run `GlassProfilingBenchmark#lazyContainerScroll` once in each worktree, with
+`-Pandroid.testInstrumentationRunnerArguments.androidx.benchmark.dryRunMode.enable=true`, and check
+that the XML result names its method. Do not archive a dry run as a measurement.
+
+Then run this loop in each worktree, in the order A, B, then B, A. `sourceUpdateIndependent2` and
+`sourceUpdateContainer2` are guards: they keep their `gates_for` gates from
+[Run the Glass container comparison](#run-the-glass-container-comparison), defined in the same shell,
+and should not regress beyond single-pass uncertainty.
+
+```bash
+(
+set -e
+trap 'adb shell cmd power set-fixed-performance-mode-enabled false' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+adb shell cmd power set-fixed-performance-mode-enabled true
+mkdir -p internal/benchmark/build/benchmark-results
+results_dir=$(mktemp -d internal/benchmark/build/benchmark-results/lazy-container.XXXXXX)
+echo "Results: $results_dir"
+for method in lazyContainerScroll sourceUpdateIndependent2 sourceUpdateContainer2; do
+  if adb shell dumpsys window | grep -q "isKeyguardShowing=true"; then
+    echo "Keyguard showing before $method; unlock the device and restart"
+    exit 3
+  fi
+  gates=()
+  if [ "$method" != lazyContainerScroll ]; then gates_for "$method"; fi
+  ./gradlew --no-scan :internal:benchmark:connectedBenchmarkReleaseAndroidTest \
+    -Pandroid.testInstrumentationRunnerArguments.class="dev.chrisbanes.haze.GlassProfilingBenchmark#${method}"
+  python3 internal/benchmark/archive_result.py \
+    --method "dev.chrisbanes.haze.GlassProfilingBenchmark#${method}" \
+    "${gates[@]}" \
+    --destination "$results_dir/$method"
+done
+)
+```
+
+Copy each archive out of its worktree before the next build replaces outputs. Record the device
+model and build, refresh rate, thermal and battery state, both builds' SHAs and APK SHA-256 hashes,
+and the run order. Report per-iteration CPU placement as described in
+[Check CPU placement before attributing a regression](#check-cpu-placement-before-attributing-a-regression).
+
 ## Run the fixed-quality sweep
 
 Run each Glass fixed-quality method explicitly and verify its result label. A combined selector
@@ -227,6 +505,225 @@ adb shell am force-stop dev.chrisbanes.haze.sample.android
 `connectedBenchmarkReleaseAndroidTest` runs only this module's release benchmark variant. Do not
 use `connectedCheck` for calibration: it also schedules the non-minified and baseline-profile
 instrumentation work, which can change device state or mix artifact output with the recorded run.
+
+## Run the Glass container comparison
+
+Run each method individually. Dry-run first, with
+`-Pandroid.testInstrumentationRunnerArguments.androidx.benchmark.dryRunMode.enable=true`, and check
+that each XML result names its method; do not archive a dry run as a measurement. A dry run writes
+only XML, so it cannot check the gates below. Run a gated diagnostic for that, then the
+two measured passes, the second in the opposite order, so that order and thermal drift do not
+favour one row. Each loop archives every method with `archive_result.py`, which checks the
+iteration count, a passing XML testcase, distinct traces, a full set of runs for every single-value
+metric, a recorded `frameCount` of at least `--min-frames` (default 1) in every iteration, and the per-method gates
+from [Glass container comparison](#glass-container-comparison).
+
+Define the per-method gates once in the shell that runs the loops:
+
+```bash
+gates_for() {
+  gates=(--per-frame hazeSourceRecordCount=0.9:1.1 --positive hazeGlassRuntimeDrawCount)
+  case "$1" in
+    sourceUpdateIndependent2) gates+=(--per-frame graphicsLayerDrawCount=1.8:2.2) ;;
+    sourceUpdateContainer2|containerGap2|containerPress2|containerGroup3)
+      gates+=(--per-frame graphicsLayerDrawCount=0.9:1.1) ;;
+  esac
+}
+```
+
+### Run the gated diagnostic
+
+Run each method once at the standard eight iterations, about 70 s per method. The diagnostic proves
+that the gates pass on the installed APKs. It is never published, because the measured passes add the
+recorded device conditions and the reversed order.
+
+```bash
+(
+set -e
+trap 'adb shell cmd power set-fixed-performance-mode-enabled false' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+adb shell cmd power set-fixed-performance-mode-enabled true
+mkdir -p internal/benchmark/build/benchmark-results
+results_dir=$(mktemp -d internal/benchmark/build/benchmark-results/container.XXXXXX)
+echo "Results: $results_dir"
+for method in sourceUpdateIndependent2 sourceUpdateContainer2; do
+  if adb shell dumpsys window | grep -q "isKeyguardShowing=true"; then
+    echo "Keyguard showing before $method; unlock the device and restart"
+    exit 3
+  fi
+  gates_for "$method"
+  ./gradlew --no-scan :internal:benchmark:connectedBenchmarkReleaseAndroidTest \
+    -Pandroid.testInstrumentationRunnerArguments.class="dev.chrisbanes.haze.GlassProfilingBenchmark#${method}"
+  python3 internal/benchmark/archive_result.py \
+    --method "dev.chrisbanes.haze.GlassProfilingBenchmark#${method}" \
+    "${gates[@]}" \
+    --destination "$results_dir/diagnostic/$method"
+done
+)
+```
+
+### Run the measured passes
+
+Before each pass, record the device model and Android build, the refresh rate (`vsyncRate`), the
+thermal status and the battery temperature and level. Record the SHA-256 of the installed APKs and
+the run order with the results. Check for the keyguard before each method: a locked device
+interrupts the run, so restart that method into a fresh archive directory.
+
+```bash
+(
+set -e
+trap 'adb shell cmd power set-fixed-performance-mode-enabled false' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+adb shell cmd power set-fixed-performance-mode-enabled true
+mkdir -p internal/benchmark/build/benchmark-results
+results_dir=$(mktemp -d internal/benchmark/build/benchmark-results/container.XXXXXX)
+echo "Results: $results_dir"
+pass_one=(sourceUpdateIndependent2 sourceUpdateContainer2)
+pass_two=(sourceUpdateContainer2 sourceUpdateIndependent2)
+for pass in one two; do
+  methods=("${pass_one[@]}")
+  if [ "$pass" = two ]; then methods=("${pass_two[@]}"); fi
+  {
+    echo "== pass $pass: ${methods[*]}"
+    adb shell getprop ro.product.model
+    adb shell getprop ro.build.fingerprint
+    adb shell dumpsys thermalservice | grep -E "Thermal Status|mName=(battery|soc_therm|VIRTUAL-SKIN)"
+    adb shell dumpsys battery | grep -E "temperature|level|AC powered"
+    adb shell dumpsys SurfaceFlinger | grep -m1 -oE "vsyncRate=[0-9.]+ Hz"
+    shasum -a 256 \
+      sample/android/build/outputs/apk/benchmarkRelease/android-benchmarkRelease.apk \
+      internal/benchmark/build/outputs/apk/benchmarkRelease/benchmark-benchmarkRelease.apk
+  } | tee -a "$results_dir/conditions.txt"
+  for method in "${methods[@]}"; do
+    if adb shell dumpsys window | grep -q "isKeyguardShowing=true"; then
+      echo "Keyguard showing before $pass/$method; unlock the device and restart" | tee -a "$results_dir/conditions.txt"
+      exit 3
+    fi
+    gates_for "$method"
+    ./gradlew --no-scan :internal:benchmark:connectedBenchmarkReleaseAndroidTest \
+      -Pandroid.testInstrumentationRunnerArguments.class="dev.chrisbanes.haze.GlassProfilingBenchmark#${method}"
+    python3 internal/benchmark/archive_result.py \
+      --method "dev.chrisbanes.haze.GlassProfilingBenchmark#${method}" \
+      "${gates[@]}" \
+      --destination "$results_dir/$pass/$method"
+  done
+done
+)
+```
+
+If Perfetto stalls waiting for the `track_event` data source, force-stop the Google app as
+described in [Prepare the device](#prepare-the-device) and restart the pass.
+
+### Report CPU placement per iteration
+
+Report main-thread and RenderThread placement for every archived iteration, as described in
+[Check CPU placement before attributing a regression](#check-cpu-placement-before-attributing-a-regression).
+Save this query as `placement.sql`. It totals the running time per CPU of the app's main thread and
+RenderThread inside the `measureBlock` slice of one trace:
+
+```sql
+with w as (select ts, ts + dur as te from slice where name = 'measureBlock' limit 1)
+select thread.name as thread, sched.cpu as cpu,
+  round(sum(min(sched.ts + sched.dur, w.te) - max(sched.ts, w.ts)) / 1e6, 1) as running_ms
+from sched join thread using(utid) join process using(upid), w
+where process.name = 'dev.chrisbanes.haze.sample.android'
+  and (thread.tid = process.pid or thread.name = 'RenderThread')
+  and sched.ts < w.te and sched.ts + sched.dur > w.ts
+group by thread.name, sched.cpu order by thread.name, sched.cpu;
+```
+
+Run it over each trace with Perfetto's `trace_processor_shell`, one iteration per trace. This
+covers both methods in both measured passes (32 traces). The loops above run in subshells, so set
+`results_dir` to the path they printed after `Results:`:
+
+```bash
+results_dir=internal/benchmark/build/benchmark-results/container.XXXXXX  # replace XXXXXX with the printed suffix
+find "$results_dir/one" "$results_dir/two" -name '*.perfetto-trace' | sort | while read -r trace; do
+  echo "== $trace"
+  trace_processor_shell -q placement.sql "$trace"
+done
+```
+
+## Nested input-sharing comparison
+
+`GlassFeedBenchmark`'s `Nested` methods (#1615) measure `HazeInputSharing` with two nested
+sources. An outer host source contains the whole feed source. The four existing header controls
+sample the feed, and two fixed 40 dp bottom controls sample the host. Every control sits outside
+both captured subtrees. Within each row the content, geometry, animation, styles, duration and
+effects are identical; only the two sharing policies differ:
+
+| Workload/effect | Neither shares (`Never`/`Never`) | Only the feed shares (`Auto`/`Never`) | Both share (`Auto`/`Auto`) |
+| --- | --- | --- | --- |
+| Video Glass | `feedVideoGlassNestedUnshared` | `feedVideoGlassNestedFeedOnly` | `feedVideoGlassNestedBoth` |
+| Scroll Glass | `feedScrollGlassNestedUnshared` | `feedScrollGlassNestedFeedOnly` | `feedScrollGlassNestedBoth` |
+| Video Blur | `feedVideoBlurNestedUnshared` | `feedVideoBlurNestedFeedOnly` | `feedVideoBlurNestedBoth` |
+| Scroll Blur | `feedScrollBlurNestedUnshared` | `feedScrollBlurNestedFeedOnly` | `feedScrollBlurNestedBoth` |
+
+Each method launches the scenario ID in snake case, such as `feed_video_glass_nested_feed_only`.
+Do not average these rows with the flat `feedVideoGlass` family: they answer a different
+comparison.
+
+### Replay oracle
+
+`HazeSource.record`, Kotlin draw counts and `sourceReplay` do not count source replays: the
+`sourceReplay` metric counts every faded card and chip, and HWUI renders a shared source's layer
+under a `drawLayer [graphicsLayer] 1080.0 x 2400.0` slice whose size is the same for the feed and
+the host. Each nested scene instead draws two fixed replay markers, a `graphicsLayer` with alpha and
+overlapping draws, identical in all nested variants. The 188×40 dp feed marker lies under the header
+controls inside the feed source, and the 88×40 dp host marker lies under the bottom controls inside
+the host source. Each replay of a source's display list emits one RenderThread slice named
+`alpha caused saveLayer <width>x<height>`, in pixels. On the Pixel 8a (2.625 density) the feed
+marker is `alpha caused saveLayer 494x105` and the host marker is `alpha caused saveLayer 231x105`;
+convert the sizes for another density.
+
+Save this query as `oracle.sql`. It counts both markers inside every RenderThread `DrawFrames`
+slice in `measureBlock`, then groups frames by those counts:
+
+```sql
+with w as (select ts, ts + dur as te from slice where name = 'measureBlock' limit 1),
+frames as (
+  select s.id from slice s join thread_track tt on s.track_id = tt.id join thread using(utid)
+  join process using(upid), w
+  where thread.name = 'RenderThread' and process.name = 'dev.chrisbanes.haze.sample.android'
+    and s.name like 'DrawFrames%' and s.ts >= w.ts and s.ts < w.te
+),
+per_frame as (
+  select
+    (select count(*) from descendant_slice(f.id) d where d.name = 'alpha caused saveLayer 494x105') as feed,
+    (select count(*) from descendant_slice(f.id) d where d.name = 'alpha caused saveLayer 231x105') as host
+  from frames f
+)
+select feed, host, count(*) as frames from per_frame group by feed, host order by frames desc;
+```
+
+Calibration on the Pixel 8a, one dry-run trace per method at build `cb12b9e35`, gave 180 frames in
+every method at these counts. The remaining one to three frames per trace replayed fewer markers,
+or none, when the content had not changed:
+
+| Policies | Feed replays per frame | Host replays per frame |
+| --- | --- | --- |
+| Neither shares | 7: window, four header effects, two bottom effects | 3: window, two bottom effects |
+| Only the feed shares | 1, into the feed's layer | 3 |
+| Both share | 1, into the feed's layer | 1, into the host's layer |
+
+All four workload/effect rows gave the same counts. With both sharing, the host's replay draws the
+feed's texture, so the feed's display list is still replayed once per changing frame. A shared row
+with more than one feed replay per changing frame is a sharing failure, not a timing result. Run the
+query over every measured trace and retain its output with the archive.
+
+### Run the nested comparison
+
+Dry-run each of the twelve methods separately first, as described in
+[Validate automation](#validate-automation). Then measure every method once in forward order, each
+row Unshared, FeedOnly, Both, then again in exact reverse order, with the same APKs. Archive and
+verify each method with `archive_result.py --iterations 8` before starting the next, into
+`<pass>/<method>` under one results directory. Record the conditions listed in
+[Run the measured passes](#run-the-measured-passes) before each pass and after the session, and run
+`placement.sql` and `oracle.sql` over every archived trace. Report the mean of the two per-pass
+summaries together with each pass's spread; a mean of per-pass P90 values is not a pooled
+percentile.
 
 ## Run a profile
 
@@ -292,9 +789,15 @@ JSON reports and Perfetto traces are copied to:
 internal/benchmark/build/outputs/connected_android_test_additional_output/
 ```
 
+A Blur or Glass profiling iteration fails with a `phase=complete` timeout when its scenario never
+started, for example because the start click was lost. It is not a measurement; rerun the method.
+An iteration that ran but recorded no frames is instead rejected by `archive_result.py --min-frames`.
+
 Use `frameOverrunMs` for deadline misses and `frameDurationCpuMs` for UI-thread and RenderThread
 cost. A positive `hazeGlassRuntimeDrawCount` confirms that a Glass scenario used the modern runtime
-delegate. The no-Glass control intentionally omits that metric.
+delegate. It counts UI-thread recording, not rendered frames: with source input, a changing source
+re-renders retained Glass layers on the RenderThread, so use `graphicsLayerDrawCount` for per-frame
+layer rendering. The no-Glass control intentionally omits that metric.
 
 Open representative traces in Android Studio or Perfetto. Application markers describe CPU-side
 preparation, recording, and submission; they do not directly measure GPU shader duration. Inspect
@@ -317,6 +820,10 @@ rule out untraced driver work. Use native call stacks when finer CPU attribution
 
 Expected Glass markers include:
 
+- `HazeGlass.containerRecluster`
+  - `HazeGlass.containerTranslate` attempts to reuse the previous partition
+  - `HazeGlass.containerCluster` runs when the partition cannot be reused
+- `HazeGlass.containerReconcile`
 - `HazeGlass.prepare`
   - `HazeGlass.prepareBudget`
   - `HazeGlass.selectDelegate`
@@ -337,6 +844,19 @@ Expected Glass markers include:
 - `HazeGlass.groupAlpha`
 - `HazeGlass.compose`
 
+Container markers cover whole passes, rather than individual members. Compare their total duration
+per frame; the fraction of partition checks that reuse is
+`1 - containerClusterCount / containerTranslateCount` when the latter is nonzero.
+`HazeSurfaces.portable` covers preparation and drawing when every surface uses portable input.
+Members resolve their captures and bounds as a batch before drawing.
+On API 29 and newer, the lazy profiling grid also records `HazeGlass.lazyDrawCpuNs` while app tracing
+is enabled and the grid is scrolling. Each counter value is the calling thread's CPU time inside one
+grid draw, in nanoseconds; it excludes blocked time and does not measure the complete frame or GPU work.
+Check that the counter spans the scroll with a sample per draw before comparing it. Independent
+members can redraw through cached child layers without redrawing the grid modifier, so this counter
+does not measure their scene cost. Compare main-thread running time inside `AndroidOwner:draw`
+slices for container-versus-independent scene comparisons.
+
 ## Android 37.2 source/backdrop comparisons
 
 Backdrop comparisons require a physical, hardware-accelerated Android 37.2 device. Record the full
@@ -353,7 +873,7 @@ The paired Quality workloads are:
 | Glass updating | `sourceUpdateQuality` | `backdropSourceUpdateQuality` |
 | Nine Glass nodes updating | `sourceUpdate9` | `backdropSourceUpdate9` |
 
-Each row records `FrameTimingMetric`, max `MemoryUsageMetric`, `HazeBackdrop.draw` count, and
+Each row records `FrameTimingMetric`, max `MemoryUsageMetric` (GPU and RSS counters), `HazeBackdrop.draw` count, and
 `HazeSource.record` count. A healthy backdrop result has native backdrop draws and zero source
 records; its source control has source records and no required backdrop draw.
 

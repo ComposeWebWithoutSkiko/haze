@@ -35,9 +35,17 @@ public sealed interface HazeInput {
    * pixels in the same window; it does not select individual source instances, include later
    * drawing, or sample content from another window.
    *
+   * Inside a dialog or popup, an eligible native backdrop therefore filters only that window's
+   * earlier pixels. Haze does not switch it to [fallback] because the fallback sources are in
+   * another window. To consume sources from the window behind, use [Sources] directly.
+   *
    * The experimental flag defaults to `false` and is read when the modifier node attaches.
-   * Changing it affects later attachments only. A native-to-source fallback transition can take
-   * one frame and remains selected until detachment after a known native failure.
+   * Changing it affects later attachments only. After a known native failure the fallback remains
+   * selected until detachment.
+   *
+   * When a native Backdrop switches to its [fallback], the first frame after the switch may draw the
+   * content unchanged, or the effect without input. The sources only record their layers while an
+   * effect asks for them, and on the native path no effect does. Later frames have input.
    *
    * @property fallback Optional source input used only when the native backdrop is unavailable or
    * fails. A `null` fallback leaves the content unchanged when native backdrop rendering is not
@@ -79,6 +87,12 @@ public sealed interface HazeSourceSelection {
    * Refines this selection using immutable source metadata.
    *
    * Repeated refinements compose with logical AND.
+   *
+   * Two refinements are equal only when they share the same base selection and equal
+   * [predicate]s: the same lambda instance, or equal function references on platforms where those
+   * compare equal. Lambdas compare by identity, so two separate lambda literals with identical
+   * bodies are not equal. Hoist or `remember` a refined selection that is shared, for example
+   * between Glass container members that should merge; they must use one selection value.
    */
   public fun where(
     predicate: (HazeSourceMetadata) -> Boolean,
@@ -99,6 +113,7 @@ public sealed interface HazeSourceSelection {
   public data object All : HazeSourceSelection
 }
 
+@Poko
 private class FilteredHazeSourceSelection(
   val selection: HazeSourceSelection,
   val predicate: (HazeSourceMetadata) -> Boolean,
@@ -130,6 +145,11 @@ public sealed interface HazeSourceRetention {
    * Continue drawing the most recently rendered output.
    *
    * This visually compatible behavior is the default for source transitions.
+   *
+   * Retained output is not guaranteed to be a frozen copy of the last displayed pixels. On
+   * Android, retained Glass output can redraw from live source content after its source is lost,
+   * including descendant changes made after capture. Use [ClearWhenUnavailable] when retained
+   * output must not show source content that is no longer selected.
    */
   public data object KeepLastFrame : HazeSourceRetention
 

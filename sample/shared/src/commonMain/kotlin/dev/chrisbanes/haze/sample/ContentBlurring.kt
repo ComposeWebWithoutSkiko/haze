@@ -44,14 +44,13 @@ import androidx.navigation.NavHostController
 import coil3.compose.AsyncImage
 import coil3.compose.LocalPlatformContext
 import coil3.request.ImageRequest
-import dev.chrisbanes.haze.ExperimentalHazeApi
 import dev.chrisbanes.haze.HazeInput
 import dev.chrisbanes.haze.blur.hazeBlur
 import dev.chrisbanes.haze.blur.materials.HazeMaterials
 import dev.chrisbanes.haze.glass.GlassStyle
 import dev.chrisbanes.haze.glass.hazeGlass
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalHazeApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ContentBlurring(
   navController: NavHostController,
@@ -88,6 +87,7 @@ fun ContentBlurring(
     var clipEnabled by remember { mutableStateOf(true) }
 
     val glassShape = RoundedCornerShape(24.dp)
+    val ultraThinStyle = HazeMaterials.ultraThin()
 
     Box(Modifier.fillMaxSize()) {
       val context = LocalPlatformContext.current
@@ -106,15 +106,17 @@ fun ContentBlurring(
             when (effect) {
               SampleEffect.Blur -> Modifier.hazeBlur(
                 input = HazeInput.Content,
-                style = HazeMaterials.ultraThin().then {
-                  backgroundColor(Color.Transparent)
-                  blurredEdgeTreatment(
-                    when {
-                      clipEnabled -> BlurredEdgeTreatment.Rectangle
-                      else -> BlurredEdgeTreatment.Unbounded
-                    },
-                  )
-                  blurRadius(100.dp)
+                style = remember(ultraThinStyle, clipEnabled) {
+                  ultraThinStyle.then {
+                    backgroundColor(Color.Transparent)
+                    blurredEdgeTreatment(
+                      when {
+                        clipEnabled -> BlurredEdgeTreatment.Rectangle
+                        else -> BlurredEdgeTreatment.Unbounded
+                      },
+                    )
+                    blurRadius(100.dp)
+                  }
                 },
               )
 
@@ -122,10 +124,12 @@ fun ContentBlurring(
                 Modifier
                   .hazeGlass(
                     input = HazeInput.Content,
-                    style = GlassStyle.regular.then {
-                      backgroundColor(glassBackgroundColor)
-                      tint(Color.White.copy(alpha = 0.14f))
-                      shape(glassShape)
+                    style = remember(glassBackgroundColor, glassShape) {
+                      GlassStyle.regular.then {
+                        backgroundColor(glassBackgroundColor)
+                        tint(Color.White.copy(alpha = 0.14f))
+                        shape(glassShape)
+                      }
                     },
                   )
                   .clip(glassShape)

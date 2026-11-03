@@ -3,16 +3,28 @@
 
 package dev.chrisbanes.haze.glass
 
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shader
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.layer.GraphicsLayer
+import androidx.compose.ui.unit.IntSize
 
 internal fun interface GlassRimBrushProvider {
   operator fun invoke(key: GlassRimEffectKey): Brush?
 }
 
-internal expect fun createGlassRimBrushProvider(): GlassRimBrushProvider?
+internal expect fun createGlassRimBrushProvider(merged: Boolean = false): GlassRimBrushProvider?
 
 internal expect fun DrawScope.supportsGlassRimBrush(): Boolean
+
+/** Creates the shader that fills a merged field's source with its members' background colours. */
+internal fun interface GlassMergedBackgroundShaderProvider {
+  operator fun invoke(materialOrigin: Offset, field: GlassMergedField): Shader?
+}
+
+internal expect fun createGlassMergedBackgroundShaderProvider(): GlassMergedBackgroundShaderProvider?
 
 internal fun DrawScope.drawGlassRimWithBrush(brush: Brush): Boolean {
   if (!supportsGlassRimBrush()) return false
@@ -20,6 +32,36 @@ internal fun DrawScope.drawGlassRimWithBrush(brush: Brush): Boolean {
   return runCatchingGlassRim { drawRect(brush) }.isSuccess
 }
 
+/**
+ * Records the rim into [layer]. Returns whether the rim was drawn directly with a brush.
+ *
+ * [provider] is invoked inside the recorded block, so each draw, including a replay after the
+ * platform drops the layer's display list, sets its uniforms and draws in the same call. That is
+ * what makes a compiled program shared between providers safe.
+ */
+internal fun DrawScope.recordGlassRimLayer(
+  layer: GraphicsLayer,
+  size: IntSize,
+  provider: GlassRimBrushProvider?,
+  key: GlassRimEffectKey,
+  supportsDirectDrawing: Boolean,
+): Boolean {
+  var drawnDirectly = false
+  recordGlassLayer(layer, size) {
+    val brush = if (supportsDirectDrawing) provider?.invoke(key) else null
+    drawnDirectly = brush != null && drawGlassRimWithBrush(brush)
+    if (!drawnDirectly) drawRect(Color.Black)
+  }
+  return drawnDirectly
+}
+
 /** Keep optional rim fallback limited to runtime exceptions; propagate other failures. */
 internal inline fun <T> runCatchingGlassRim(block: () -> T): Result<T> =
   runCatching(block).onFailure { if (it !is RuntimeException) throw it }
+
+/**
+ * Compiles a direct-draw program at most once per process. A failed compile is remembered as `null`
+ * instead of being retried by every delegate. Callers read it on the UI thread, hence no locking.
+ */
+internal fun <T : Any> lazyGlassProgram(compile: () -> T): Lazy<T?> =
+  lazy(LazyThreadSafetyMode.NONE) { runCatchingGlassRim(compile).getOrNull() }

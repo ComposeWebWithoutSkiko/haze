@@ -63,14 +63,12 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavHostController
-import dev.chrisbanes.haze.ExperimentalHazeApi
 import dev.chrisbanes.haze.HazeInput
 import dev.chrisbanes.haze.HazePerformanceMode
 import dev.chrisbanes.haze.HazeProgressive
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.blur.hazeBlur
 import dev.chrisbanes.haze.blur.materials.HazeMaterials
-import dev.chrisbanes.haze.glass.GlassDefaults
 import dev.chrisbanes.haze.glass.GlassOptics
 import dev.chrisbanes.haze.glass.GlassStyle
 import dev.chrisbanes.haze.glass.GlassTransformPivot
@@ -88,7 +86,6 @@ enum class ScaffoldSampleMode {
 
 @OptIn(
   ExperimentalMaterial3Api::class,
-  ExperimentalHazeApi::class,
 )
 @Composable
 fun ScaffoldSample(
@@ -196,8 +193,8 @@ fun ScaffoldSample(
           tint = glassTint,
           performanceMode = performanceMode,
           optics = when (mode) {
-            ScaffoldSampleMode.Progressive -> GlassDefaults.optics.copy(progressive = progressive)
-            else -> GlassDefaults.optics
+            ScaffoldSampleMode.Progressive -> GlassOptics.regular.copy(progressive = progressive)
+            else -> GlassOptics.regular
           },
           title = "Glass shaped boundary".takeIf { mode == ScaffoldSampleMode.Mask },
           onBack = if (navigationEnabled) ({ navController.navigateUp() }) else null,
@@ -288,7 +285,6 @@ fun ScaffoldSample(
 }
 
 @Composable
-@OptIn(ExperimentalHazeApi::class)
 private fun GlassScaffoldTopBar(
   hazeState: HazeState,
   backgroundColor: Color,
@@ -345,7 +341,6 @@ private fun GlassScaffoldTopBar(
 }
 
 @Composable
-@OptIn(ExperimentalHazeApi::class)
 private fun GlassScaffoldNavigationBar(
   hazeState: HazeState,
   backgroundColor: Color,
@@ -360,7 +355,7 @@ private fun GlassScaffoldNavigationBar(
     backgroundColor = backgroundColor,
     tint = tint,
     performanceMode = performanceMode,
-    optics = GlassDefaults.optics,
+    optics = GlassOptics.regular,
     shape = RoundedCornerShape(32.dp),
     modifier = modifier
       .windowInsetsPadding(WindowInsets.navigationBars)
@@ -393,7 +388,6 @@ private fun GlassScaffoldNavigationBar(
 }
 
 @Composable
-@OptIn(ExperimentalHazeApi::class)
 private fun GlassScaffoldSurface(
   hazeState: HazeState,
   backgroundColor: Color,
@@ -410,24 +404,26 @@ private fun GlassScaffoldSurface(
       .hazeGlass(
         input = HazeInput.Sources(hazeState),
         performanceMode = performanceMode,
-        style = GlassStyle {
-          backgroundColor(backgroundColor)
-          tint(tint)
-          shape(shape)
-          optics(optics)
-          hovered {
-            animate(DefaultGlassHoverAnimationSpec, DefaultGlassReleaseAnimationSpec) {
-              lightingIntensity(0.35f)
-              refractionMultiplier(1.02f)
-              whitePointDelta(0.01f)
+        style = remember(backgroundColor, tint, shape, optics) {
+          GlassStyle {
+            backgroundColor(backgroundColor)
+            tint(tint)
+            shape(shape)
+            optics(optics)
+            hovered {
+              animate(DefaultGlassHoverAnimationSpec, DefaultGlassReleaseAnimationSpec) {
+                lightingIntensity(0.35f)
+                refractionMultiplier(1.02f)
+                whitePointDelta(0.01f)
+              }
             }
-          }
-          pressed {
-            animate(DefaultGlassPressAnimationSpec, DefaultGlassReleaseAnimationSpec) {
-              lightingIntensity(1f)
-              refractionMultiplier(1.08f)
-              whitePointDelta(0.04f)
-              scale(0.98f)
+            pressed {
+              animate(DefaultGlassPressAnimationSpec, DefaultGlassReleaseAnimationSpec) {
+                lightingIntensity(1f)
+                refractionMultiplier(1.08f)
+                whitePointDelta(0.04f)
+                scale(0.98f)
+              }
             }
           }
         },

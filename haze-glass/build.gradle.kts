@@ -3,6 +3,7 @@
 
 
 import dev.chrisbanes.gradle.addDefaultHazeTargets
+import org.gradle.api.tasks.testing.Test
 
 plugins {
   id("dev.chrisbanes.android.library")
@@ -74,6 +75,13 @@ kotlin {
       }
     }
 
+    named("androidHostTest") {
+      dependencies {
+        implementation(projects.internal.screenshotTest)
+        implementation(libs.compose.ui.test.junit4)
+      }
+    }
+
     jvmTest {
       dependencies {
         implementation(compose.desktop.currentOs)
@@ -81,9 +89,10 @@ kotlin {
     }
   }
 
-  compilerOptions {
-    optIn.add("dev.chrisbanes.haze.ExperimentalHazeApi")
-    optIn.add("dev.chrisbanes.haze.InternalHazeApi")
+  // Main sources opt in file by file; tests use the experimental and internal APIs freely.
+  sourceSets.matching { it.name.endsWith("Test") }.configureEach {
+    languageSettings.optIn("dev.chrisbanes.haze.ExperimentalHazeApi")
+    languageSettings.optIn("dev.chrisbanes.haze.InternalHazeApi")
   }
 }
 
@@ -93,4 +102,13 @@ dependencies {
 
 poko {
   pokoAnnotation.set("dev/chrisbanes/haze/Poko")
+}
+
+tasks.withType<Test>().matching { it.name == "testAndroidHostTest" }.configureEach {
+  systemProperty("robolectric.pixelCopyRenderMode", "hardware")
+}
+
+// The CPU-bound Skiko Desktop suite ran as a single 17-minute fork on CI's critical path.
+tasks.withType<Test>().matching { it.name == "jvmTest" }.configureEach {
+  maxParallelForks = 4
 }

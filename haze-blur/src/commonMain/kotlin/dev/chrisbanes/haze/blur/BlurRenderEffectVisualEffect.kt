@@ -4,18 +4,22 @@
 package dev.chrisbanes.haze.blur
 
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.GraphicsContext
-import androidx.compose.ui.graphics.RenderEffect
+import androidx.compose.ui.graphics.Paint
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.layer.GraphicsLayer
 import androidx.compose.ui.graphics.layer.drawLayer
+import androidx.compose.ui.layout.ScaleFactor
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.roundToIntSize
 import androidx.compose.ui.unit.takeOrElse
+import androidx.compose.ui.unit.toSize
 import androidx.compose.ui.util.lerp
 import dev.chrisbanes.haze.ExperimentalHazeApi
 import dev.chrisbanes.haze.HazeEffectInputSnapshot
@@ -26,16 +30,19 @@ import dev.chrisbanes.haze.HazeProgressive as RootHazeProgressive
 import dev.chrisbanes.haze.InternalHazeApi
 import dev.chrisbanes.haze.Poko
 import dev.chrisbanes.haze.TrimMemoryLevel
-import dev.chrisbanes.haze.asBrush
-import dev.chrisbanes.haze.asComposeRenderEffect
-import dev.chrisbanes.haze.withGraphicsLayer
+import dev.chrisbanes.haze.createScaledContentLayer
+import dev.chrisbanes.haze.drawScaledContent
+import dev.chrisbanes.haze.scaledContentScale
+import dev.chrisbanes.haze.translate
 import kotlin.math.ceil
 
 @OptIn(ExperimentalHazeApi::class, InternalHazeApi::class)
 internal class RenderEffectBlurVisualEffectDelegate(
   val blurVisualEffect: BlurVisualEffect,
-) : BlurVisualEffect.Delegate, RetainedOutputDelegate {
-  private var renderEffect: RenderEffect? = null
+) : BlurVisualEffect.Delegate {
+  internal val effectSlot: BlurRenderEffectSlot = blurVisualEffect.renderEffectSlotFactory()
+  private val bands = mutableListOf<Band>()
+  internal val bandMasks = BandMasks()
   internal var scaledContentLayer: GraphicsLayer? = null
     private set
   private var lastScaledLayerSize: Size? = null
@@ -80,6 +87,7 @@ internal class RenderEffectBlurVisualEffectDelegate(
       inputSnapshot = context.inputSnapshot,
       scaleFactor = scaleFactor,
       scaledLayerSize = currentScaledSize,
+      captureScale = scaledContentScale(context.layerSize, scaleFactor),
       layerOffset = context.layerOffset,
       backgroundColor = blurVisualEffect.backgroundColor,
     )
@@ -106,6 +114,7 @@ internal class RenderEffectBlurVisualEffectDelegate(
     val resultLayer = if (inputCaptureKey == currentCaptureKey) {
       layer
     } else {
+      blurVisualEffect.invalidateRenderEffectOnInputChange()
       // Returns null when the scaled size is 0 (e.g., window minimized).
       createScaledContentLayer(
         context = context,
@@ -113,6 +122,7 @@ internal class RenderEffectBlurVisualEffectDelegate(
         layerSize = context.layerSize,
         backgroundColor = blurVisualEffect.backgroundColor,
         existingLayer = layer,
+        fillCapture = true,
       )?.also {
         inputCaptureKey = currentCaptureKey
       } ?: return
@@ -131,7 +141,7 @@ internal class RenderEffectBlurVisualEffectDelegate(
     layer.clip = clip
     drawScaledContent(
       offset = -context.layerOffset,
-      scaledSize = size * scaleFactor,
+      captureScale = scaledContentScale(context.layerSize, scaleFactor),
       clip = clip,
     ) {
       val p = blurVisualEffect.progressive
@@ -144,13 +154,21 @@ internal class RenderEffectBlurVisualEffectDelegate(
           inputScale = scaleFactor,
         )
       } else {
-        updateRenderEffectIfDirty(context, scaleFactor)
-        layer.renderEffect = renderEffect
+        trimBandSlots(0)
+        // Always resolve the current RenderEffect, so changes coming from either the effect itself
+        // or the hosting node (e.g., size, layer offset, input scale) are reflected without relying
+        // on local dirty flags. The slot makes the unchanged case cheap.
+        effectSlot.apply(
+          layer,
+          blurVisualEffect.getOrCreateRenderEffect(context, inputScale = scaleFactor, slot = effectSlot),
+        )
         layer.alpha = blurVisualEffect.alpha
         drawLayer(layer)
       }
     }
   }
+
+  override val supportsBackdropRenderEffect: Boolean get() = true
 
   override fun canDrawRetainedOutput(): Boolean {
     return retainedOutputAvailable && scaledContentLayer?.isReleased == false
@@ -184,23 +202,39 @@ internal class RenderEffectBlurVisualEffectDelegate(
     }
     scaledContentLayer = null
     lastScaledLayerSize = null
-    renderEffect = null
+    effectSlot.reset()
+    trimBandSlots(0)
     graphicsContext = null
     retainedOutputAvailable = false
     inputCaptureKey = null
   }
 
-  private fun updateRenderEffectIfDirty(
-    context: HazeEffectRuntimeDrawScope,
-    scaleFactor: Float,
-  ) {
-    // Always resolve the current RenderEffect using the memoized cache keyed by params.
-    // This ensures that changes coming from either the effect itself OR the hosting node
-    // (e.g., size, layer offset, input scale, etc.) will be reflected without relying on
-    // the effect's local dirty flags only.
-    renderEffect = blurVisualEffect
-      .getOrCreateRenderEffect(context, inputScale = scaleFactor)
-      .asComposeRenderEffect()
+  internal val bandSlotCount: Int get() = bands.size
+
+  /** The slot for the [index]th band of a layered progressive draw, in draw order. */
+  internal fun bandSlot(index: Int): BlurRenderEffectSlot = band(index).slot
+
+  /** The retained layer for the [index]th band, recorded again on every layered draw. */
+  internal fun bandLayer(index: Int): RetainedGraphicsLayer = band(index).layer
+
+  private fun band(index: Int): Band {
+    while (bands.size <= index) bands += Band(blurVisualEffect.renderEffectSlotFactory())
+    return bands[index]
+  }
+
+  /** Drops the slots and layers of bands the latest layered draw no longer has, and the masks with the last. */
+  internal fun trimBandSlots(count: Int) {
+    while (bands.size > count) {
+      bands.removeAt(bands.lastIndex).let {
+        it.slot.reset()
+        it.layer.release()
+      }
+    }
+    if (count == 0) bandMasks.clear()
+  }
+
+  private class Band(val slot: BlurRenderEffectSlot) {
+    val layer = RetainedGraphicsLayer()
   }
 
   @Poko
@@ -208,6 +242,7 @@ internal class RenderEffectBlurVisualEffectDelegate(
     val inputSnapshot: HazeEffectInputSnapshot?,
     val scaleFactor: Float,
     val scaledLayerSize: Size,
+    val captureScale: ScaleFactor,
     val layerOffset: Offset,
     val backgroundColor: Color,
   )
@@ -224,6 +259,8 @@ internal expect fun RenderEffectBlurVisualEffectDelegate.drawProgressiveEffect(
   context: HazeEffectRuntimeDrawScope,
   inputScale: Float,
 )
+
+internal expect fun BlurVisualEffect.invalidateRenderEffectOnInputChange()
 
 /** Draws [progressive] for the platforms that can't run the runtime shader of the blur. */
 @OptIn(ExperimentalHazeApi::class, InternalHazeApi::class)
@@ -248,15 +285,18 @@ internal fun RenderEffectBlurVisualEffectDelegate.drawProgressiveEffectWithoutRu
     )
   } else {
     // Otherwise draw the masked blur over its input, preserving unblurred regions.
+    trimBandSlots(0)
     with(drawScope) {
-      contentLayer.renderEffect = blurVisualEffect
-        .getOrCreateRenderEffect(
+      effectSlot.apply(
+        contentLayer,
+        blurVisualEffect.getOrCreateRenderEffect(
           context = context,
           inputScale = inputScale,
-          mask = progressive.asBrush(),
+          progressiveMask = checkNotNull(blurVisualEffect.progressiveBrush),
           retainInputWhenMasked = progressive is RootHazeProgressive.LinearGradient,
-        )
-        .asComposeRenderEffect()
+          slot = effectSlot,
+        ),
+      )
       contentLayer.alpha = blurVisualEffect.alpha
 
       // Finally draw the layer
@@ -275,38 +315,70 @@ private fun RenderEffectBlurVisualEffectDelegate.drawLinearGradientProgressiveEf
 ) = with(drawScope) {
   // The retained capture may have been drawn through the ordinary or masked path.
   // Record the unprocessed input so its prior effect and alpha do not compound here.
-  contentLayer.renderEffect = null
+  effectSlot.apply(contentLayer, null)
   contentLayer.alpha = 1f
 
   val colorEffects = blurVisualEffect.colorEffects
   val noiseFactor = blurVisualEffect.noiseFactor
   val blurRadius = blurVisualEffect.blurRadius.takeOrElse { 0.dp }
 
-  drawProgressiveWithMultipleLayers(progressive) { mask, intensity ->
-    context.withGraphicsLayer { layer ->
-      layer.record(contentLayer.size) {
-        drawLayer(contentLayer)
-      }
+  // Bands overlap, so fade their composite once: masking or fading each band would not be equivalent.
+  val userMask = blurVisualEffect.mask
+  val alpha = blurVisualEffect.alpha
+  val layerSize = contentLayer.size.toSize()
+  val compositeLayer = userMask != null || alpha < 1f
+  if (compositeLayer) {
+    drawContext.canvas.saveLayer(Rect(Offset.Zero, layerSize), Paint().apply { this.alpha = alpha })
+  }
 
-      HazeLogger.d(RenderEffectBlurVisualEffectDelegate.TAG) {
-        "drawLinearGradientProgressiveEffectUsingLayers. mask=$mask, intensity=$intensity"
-      }
-
-      layer.renderEffect = blurVisualEffect
-        .getOrCreateRenderEffect(
-          context = context,
-          inputScale = inputScale,
-          blurRadius = blurRadius * intensity,
-          noiseFactor = noiseFactor,
-          colorEffects = colorEffects.orEmpty(),
-          colorEffectsAlphaModulate = intensity,
-          mask = mask,
-        )
-        .asComposeRenderEffect()
-      layer.alpha = blurVisualEffect.alpha
-
-      drawLayer(layer)
+  var band = 0
+  drawProgressiveWithMultipleLayers(progressive, masks = bandMasks) { mask, intensity ->
+    val index = band++
+    val slot = bandSlot(index)
+    val layer = bandLayer(index).acquire(context.requireGraphicsContext())
+    layer.record(contentLayer.size) {
+      drawLayer(contentLayer)
     }
+
+    HazeLogger.d(RenderEffectBlurVisualEffectDelegate.TAG) {
+      "drawLinearGradientProgressiveEffectUsingLayers. mask=$mask, intensity=$intensity"
+    }
+
+    slot.apply(
+      layer,
+      blurVisualEffect.getOrCreateRenderEffect(
+        context = context,
+        inputScale = inputScale,
+        blurRadius = blurRadius * intensity,
+        noiseFactor = noiseFactor,
+        colorEffects = colorEffects.orEmpty(),
+        colorEffectsAlphaModulate = intensity,
+        mask = mask,
+        slot = slot,
+      ),
+    )
+    layer.alpha = 1f
+
+    // Since we included a border around the content, we need to translate so that
+    // we don't see it (but it still affects the RenderEffect)
+    drawLayer(layer)
+  }
+
+  trimBandSlots(band)
+
+  if (userMask != null) {
+    // Cover the expanded layer so clamped mask values reach its outset, as in the shader path.
+    translate(context.layerOffset) {
+      drawRect(
+        brush = userMask,
+        topLeft = -context.layerOffset,
+        size = layerSize,
+        blendMode = BlendMode.DstIn,
+      )
+    }
+  }
+  if (compositeLayer) {
+    drawContext.canvas.restore()
   }
 }
 
@@ -319,14 +391,20 @@ internal fun shouldDrawProgressiveWithLayers(
 internal fun DrawScope.drawProgressiveWithMultipleLayers(
   progressive: RootHazeProgressive.LinearGradient,
   stepHeight: Dp = 64.dp,
+  masks: BandMasks? = null,
   block: (mask: Brush, intensity: Float) -> Unit,
 ) {
-  // Here we're going to calculate an appropriate amount of steps for the length.
-  // We use a calculation of 60dp per step, which is a good balance between
-  // quality vs performance
+  // Use 64dp per step to balance quality and drawing work.
   val stepHeightPx = with(drawContext.density) { stepHeight.toPx() }
   val length = calculateLength(progressive.start, progressive.end, size)
-  val steps = ceil(length / stepHeightPx).toInt().coerceAtLeast(2)
+  // Reject invalid arithmetic before drawing, leaving room for the inclusive final layer.
+  require(length.isFinite() && length >= 0f) { "Gradient length must be finite and nonnegative" }
+  require(stepHeightPx.isFinite() && stepHeightPx > 0f) { "Step height must be finite and positive" }
+  val derivedSteps = ceil(length / stepHeightPx)
+  require(derivedSteps.isFinite() && derivedSteps.toDouble() <= Int.MAX_VALUE.toDouble() - 1) {
+    "Gradient layer count exceeds the supported integer range"
+  }
+  val steps = derivedSteps.toInt().coerceAtLeast(2)
 
   val seq = when {
     progressive.endIntensity >= progressive.startIntensity -> 0..steps
@@ -342,14 +420,7 @@ internal fun DrawScope.drawProgressiveWithMultipleLayers(
       progressive.easing.transform(fraction),
     )
 
-    val mask = Brush.linearGradient(
-      (i - 2f) / steps to Color.Transparent,
-      (i - 1f) / steps to Color.Black,
-      (i + 0f) / steps to Color.Black,
-      (i + 1f) / steps to Color.Transparent,
-      start = progressive.start,
-      end = progressive.end,
-    )
+    val mask = masks?.maskFor(progressive, steps, i) ?: bandMask(progressive, steps, i)
 
     block(mask, intensity)
   }

@@ -21,9 +21,16 @@ in `sample/`; library screenshots in `haze-screenshot-tests`, sample screenshots
   Apply Spotless to changed modules before committing.
 - Keep public packages under `dev.chrisbanes.haze.*`; use PascalCase for composables, camelCase
   for parameters, and `*Defaults` for reusable configuration containers.
-- Prefer `@Poko` for internal/private value types. Configure
-  `pokoAnnotation.set("dev/chrisbanes/haze/Poko")`; use `data class` when `copy` or destructuring
-  is intentional.
+- Prefer `@Poko` for value types. Configure `pokoAnnotation.set("dev/chrisbanes/haze/Poko")`. For
+  internal or private types, use `data class` when `copy` or destructuring is intentional. Public
+  value types use `@Poko` with an explicit `copy`, because adding a property to a public
+  `data class` breaks binary compatibility.
+- Binary compatibility binds only released signatures: those in the module's latest
+  `api/<version>.txt`. Evolve an unreleased declaration in place, such as adding a parameter with
+  a default, and add forwarding overloads only to keep a released signature working.
+- Public enums and `sealed exhaustive` types, in core `haze` too, may gain entries or subtypes in
+  minor releases. In the KDoc of each one you add or change, say so and tell callers to keep an
+  `else` branch when they match exhaustively. Record each addition in `CHANGELOG.md`.
 - Use AssertK for value, type, collection, boolean, and exception assertions, including custom
   assertion helpers. Do not use assertions from `kotlin.test`, JUnit, or Truth. Prefer semantic
   assertions (`isNull`, `contains`, `isInstanceOf`); use `isTrue`/`isFalse` only for boolean results.
@@ -45,8 +52,7 @@ Share application infrastructure, fixtures, or abstractions that are themselves 
   Macrobenchmarks. Use a physical device, keep it plugged in, awake, and unlocked for the complete
   run, and restore temporary device settings such as fixed-performance mode afterward.
 - Use eight measured iterations for comparable Blur and Glass results. Use dry-run mode for one
-  automation-validation iteration, or override `androidx.benchmark.iterations` to three for a quick
-  diagnostic signal; do not publish either as benchmark evidence.
+  automation-validation iteration; do not publish dry-run results as benchmark evidence.
 - Launch measured samples and profiling scenarios directly through their benchmark intent extras.
   Do not scroll through the sample list in per-iteration setup. Disable UiAutomator's idle wait only
   around continuously animating profiling scenarios and restore its previous timeout afterward.
@@ -79,15 +85,18 @@ Share application infrastructure, fixtures, or abstractions that are themselves 
 
 Read the relevant guide before starting that work:
 
-- Whenever editing `CHANGELOG.md`, write every pull request reference you add or edit as an explicit
-  Markdown link, such as [#1332](https://github.com/chrisbanes/haze/pull/1332); do not rely on GitHub
-  auto-linking. For pull requests by non-maintainers, include the contributor's name or username
-  linked to their GitHub profile, and verify the author and maintainer status before attributing them.
+- Whenever editing `CHANGELOG.md`, link entries to the relevant GitHub issues where available,
+  verifying that each issue matches the change. Write every issue or pull request reference you add
+  or edit as an explicit Markdown link, such as [#1412](https://github.com/chrisbanes/haze/issues/1412)
+  or [#1332](https://github.com/chrisbanes/haze/pull/1332). For pull requests by non-maintainers, include
+  the contributor's name or username linked to their GitHub profile, and verify the author and
+  maintainer status before attributing them.
 
 | Task | Guidance |
 | --- | --- |
 | Android physical-device benchmarks | [Runbook](internal/benchmark/README.md) |
 | Screenshot tests | [Agent rules](docs/agents/screenshot-tests.md) and [commands, profiles, recording](docs/screenshot-tests.md) |
+| Record or update documentation demo videos | [JVM recording, encoding and playback checks](docs/agents/demo-videos.md) |
 | Built-in effect runtimes | [Implementation patterns](docs/agents/effect-runtimes.md) |
 | Release changelog | [Release guidance](docs/agents/releases.md) |
 | Issues and PRDs | [Issue tracker](docs/agents/issue-tracker.md) |

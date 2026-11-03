@@ -8,11 +8,18 @@ from pathlib import Path
 
 SCENES = ["blur-credit-card", "glass-credit-card"]
 MODES = ["quality", "balanced", "performance"]
+# The Scrim fallback ignores input and performance mode, so one case per host profile is enough.
+SCRIM_FALLBACK_SELECTOR = "cupertino-scrim-fallback-sources-balanced"
 NATIVE_BACKDROP_PROOF = {
     "blurBackdrop_blursEarlierPixelsWithoutFallbackSources",
     "blurBackdrop_disabledFlag_leavesEarlierPixelsSharpWithoutFallbackSources",
     "blurBackdrop_unsupportedSdk_leavesEarlierPixelsSharpWithoutFallbackSources",
     "glassBackdrop_blursEarlierPixelsWithoutFallbackSources",
+}
+
+COLOR_FILTER_ALIGNMENT = {
+    "sourceBlur_producesSoftenedPixelsAndColorFilterOutput",
+    "identityFilter_preservesExpandedSourcesAtAllScales",
 }
 
 
@@ -28,6 +35,10 @@ def verify_report(path: Path, expected: set[str]) -> None:
 
 
 def expected_cases(platform: str) -> set[str]:
+    if platform == "color-filter-alignment-desktop":
+        return {f"{method}[jvm]" for method in COLOR_FILTER_ALIGNMENT}
+    if platform == "color-filter-alignment-android":
+        return COLOR_FILTER_ALIGNMENT
     if platform == "native-backdrop-proof":
         return NATIVE_BACKDROP_PROOF
 
@@ -39,12 +50,13 @@ def expected_cases(platform: str) -> set[str]:
     # Robolectric omits the suffix for the last SDK in @Config (currently 35).
     sdk_suffixes = ["[28]", "[32]", ""] if platform == "android" else [""]
     target_suffix = "[jvm]" if platform == "desktop" else ""
+    selectors.append(SCRIM_FALLBACK_SELECTOR)
     return {f"capture{sdk}[{selector}]{target_suffix}" for sdk in sdk_suffixes for selector in selectors}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("platform", choices=["desktop", "android", "android-native", "native-backdrop-proof"])
+    parser.add_argument("platform", choices=["desktop", "android", "android-native", "native-backdrop-proof", "color-filter-alignment-desktop", "color-filter-alignment-android"])
     parser.add_argument("report", type=Path)
     args = parser.parse_args()
     # This is the acceptance set, deliberately independent of the runner's enumeration.

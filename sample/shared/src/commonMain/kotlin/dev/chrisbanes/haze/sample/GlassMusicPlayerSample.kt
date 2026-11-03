@@ -61,9 +61,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavHostController
-import dev.chrisbanes.haze.ExperimentalHazeApi
 import dev.chrisbanes.haze.HazeInput
-import dev.chrisbanes.haze.glass.GlassDefaults
+import dev.chrisbanes.haze.glass.GlassOptics
 import dev.chrisbanes.haze.glass.GlassStyle
 import dev.chrisbanes.haze.glass.OpticalSizeValue
 import dev.chrisbanes.haze.glass.hazeGlass
@@ -109,7 +108,6 @@ internal fun SimulatedPlaybackTimer(player: MusicPlayerState) {
 }
 
 /** The rendering seam for screenshot and compose tests; playback in this sample is simulated. */
-@OptIn(ExperimentalHazeApi::class)
 @Composable
 public fun GlassMusicPlayerSampleContent(
   tracks: List<MusicTrack>,
@@ -238,7 +236,7 @@ public fun GlassMusicPlayerSampleContent(
                 GlassStyle.regular then GlassStyle {
                   shape(RoundedCornerShape(24.dp))
                   // Regular's size-responsive depth is zero at this bar's 64.dp height.
-                  optics(GlassDefaults.optics.copy(depth = OpticalSizeValue.Fixed(1f), blurRadius = OpticalSizeValue.Fixed(16.dp)))
+                  optics(GlassOptics.regular.copy(depth = OpticalSizeValue.Fixed(1f), blurRadius = OpticalSizeValue.Fixed(16.dp)))
                   tint(colors.surface.copy(alpha = 0.7f))
                 }
               },

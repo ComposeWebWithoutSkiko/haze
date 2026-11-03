@@ -12,6 +12,7 @@ import androidx.annotation.ChecksSdkIntAtLeast
 import androidx.annotation.RequiresApi
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shader
+import androidx.compose.ui.graphics.isUnspecified
 import androidx.compose.ui.graphics.toAndroidColorSpace
 
 /**
@@ -137,16 +138,21 @@ private fun createAndroidRuntimeShaderRenderEffect(
  * thread as effects first draw. A [RenderEffect] copies the shader's uniforms and children when it
  * is created, so effects can share one compiled shader if each gives it the state a new shader would
  * have before creating a [RenderEffect]: its own uniforms and children, zero for uniforms only other
- * effects set, and no children otherwise. A child cannot be unset, so between effects every child is
+ * effects set (using each uniform's integer or float type), and no children otherwise. A child cannot be unset, so between effects every child is
  * [EmptyChildShader], which samples as transparent black just as an unset child does, and which
  * keeps the shared shader from holding on to a child after the effect that set it is gone.
  */
 @RequiresApi(Build.VERSION_CODES.TIRAMISU)
 internal class SharedRuntimeShader(sksl: String) {
-  private val shader = RuntimeShader(sksl)
+  private val shader = trace("HazeRuntimeShader.construct") { RuntimeShader(sksl) }
+  private val intUniformNames = HashSet<String>()
   private val floatUniformSizes = HashMap<String, Int>()
   private val colorUniforms = HashSet<String>()
+  private val zeroArrays = HashMap<Int, FloatArray>()
   private val childNames = HashSet<String>()
+
+  /** A zero array of [size], shared because [RuntimeShader] copies it; callers must not write to it. */
+  internal fun zeroFloats(size: Int): FloatArray = zeroArrays.getOrPut(size) { FloatArray(size) }
 
   @Synchronized
   fun createEffect(
@@ -154,18 +160,25 @@ internal class SharedRuntimeShader(sksl: String) {
     shaderNames: Array<String>,
     inputs: Array<PlatformRenderEffect?>,
   ): PlatformRenderEffect {
+    for (name in intUniformNames) {
+      if (name !in uniforms.ints) shader.setIntUniform(name, 0)
+    }
     for ((name, size) in floatUniformSizes) {
-      if (name !in uniforms.floats) shader.setFloatUniform(name, FloatArray(size))
+      if (name !in uniforms.floats) shader.setFloatUniform(name, zeroFloats(size))
     }
     for (name in colorUniforms) {
       if (name !in uniforms.colors) shader.setColorUniform(name, 0)
+    }
+    for ((name, value) in uniforms.ints) {
+      shader.setIntUniform(name, value)
+      intUniformNames += name
     }
     for ((name, values) in uniforms.floats) {
       shader.setFloatUniform(name, values)
       floatUniformSizes[name] = values.size
     }
     for ((name, color) in uniforms.colors) {
-      shader.setColorUniform(name, color)
+      shader.setColorUniform(name, color.packed)
       colorUniforms += name
     }
     for ((name, child) in uniforms.children) {
@@ -189,40 +202,77 @@ private val EmptyChildShader: android.graphics.Shader by lazy {
   )
 }
 
-/** Uniforms set by one effect, applied to its [SharedRuntimeShader] each time it creates an effect. */
+/** A colour uniform recorded as an Android `ColorLong`, ready for `RuntimeShader.setColorUniform`. */
+internal class RecordedColor {
+  var packed: Long = 0L
+}
+
+/**
+ * Uniforms set by one effect, applied to its [SharedRuntimeShader] each time it creates an effect.
+ *
+ * Float and colour entries are rewritten in place when a name is set again with the same size, so
+ * a long-lived effect that updates its uniforms every frame does not allocate. That is safe because
+ * [RuntimeShader] copies the values it is given.
+ */
 @RequiresApi(Build.VERSION_CODES.TIRAMISU)
 internal class RecordedUniforms : RuntimeShaderUniformProvider {
+  val ints = HashMap<String, Int>()
   val floats = HashMap<String, FloatArray>()
-  val colors = HashMap<String, android.graphics.Color>()
+  val colors = HashMap<String, RecordedColor>()
   val children = HashMap<String, Shader>()
 
+  private fun floatsFor(name: String, size: Int): FloatArray {
+    val existing = floats[name]
+    if (existing != null && existing.size == size) return existing
+    return FloatArray(size).also { floats[name] = it }
+  }
+
   override fun setColorUniform(name: String, color: Color) {
-    colors[name] = android.graphics.Color.valueOf(
-      color.red,
-      color.green,
-      color.blue,
-      color.alpha,
-      color.colorSpace.toAndroidColorSpace(),
-    )
+    colors.getOrPut(name) { RecordedColor() }.packed = color.toAndroidColorLong()
   }
 
   override fun setFloatUniform(name: String, value: Float) {
-    floats[name] = floatArrayOf(value)
+    floatsFor(name, 1)[0] = value
   }
 
   override fun setFloatUniform(name: String, value1: Float, value2: Float) {
-    floats[name] = floatArrayOf(value1, value2)
+    floatsFor(name, 2).apply {
+      this[0] = value1
+      this[1] = value2
+    }
   }
 
   override fun setFloatUniform(name: String, value1: Float, value2: Float, value3: Float, value4: Float) {
-    floats[name] = floatArrayOf(value1, value2, value3, value4)
+    floatsFor(name, 4).apply {
+      this[0] = value1
+      this[1] = value2
+      this[2] = value3
+      this[3] = value4
+    }
+  }
+
+  override fun setFloatUniform(name: String, values: FloatArray) {
+    values.copyInto(floatsFor(name, values.size))
   }
 
   override fun setIntUniform(name: String, value: Int) {
-    floats[name] = floatArrayOf(value.toFloat())
+    ints[name] = value
   }
 
   override fun setChildShader(name: String, shader: Shader) {
     children[name] = shader
   }
+}
+
+/**
+ * Compose's [Color.value] is already an Android `ColorLong` for colour spaces with IDs up to 15. It
+ * numbers the others (BT.2020 HLG and PQ, Oklab, ...) differently, and its own `toColorLong` returns an
+ * invalid value for some of them on older SDKs, so those take the platform's pack function.
+ */
+@InternalHazeApi
+@RequiresApi(Build.VERSION_CODES.TIRAMISU)
+public fun Color.toAndroidColorLong(): Long = when {
+  isUnspecified -> 0L // Transparent black, as the shader has always received for Color.Unspecified.
+  (value and 63u).toInt() <= 15 -> value.toLong()
+  else -> android.graphics.Color.pack(red, green, blue, alpha, colorSpace.toAndroidColorSpace())
 }

@@ -5,9 +5,6 @@ package dev.chrisbanes.haze.blur
 
 import androidx.collection.LruCache
 import androidx.compose.runtime.Stable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Brush
@@ -15,7 +12,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.isSpecified
 import androidx.compose.ui.unit.Dp
-import dev.chrisbanes.haze.Bitmask
 import dev.chrisbanes.haze.HazeEffectBackdrop
 import dev.chrisbanes.haze.HazeEffectDrawScope
 import dev.chrisbanes.haze.HazeEffectLayoutScope
@@ -34,11 +30,15 @@ import dev.chrisbanes.haze.InternalHazeApi
 import dev.chrisbanes.haze.LocalHazePerformanceMode
 import dev.chrisbanes.haze.PlatformRenderEffect
 import dev.chrisbanes.haze.TrimMemoryLevel
+import dev.chrisbanes.haze.asBrush
 
 /** Node-owned Blur renderer configured by [BlurConfiguration]. */
 @Stable
 @OptIn(InternalHazeApi::class)
-internal class BlurVisualEffect :
+internal class BlurVisualEffect(
+  private val progressiveBrushFactory: (HazeProgressive) -> Brush = { it.asBrush() },
+  internal val renderEffectSlotFactory: () -> BlurRenderEffectSlot = ::BlurRenderEffectSlot,
+) :
   HazeEffectRenderer<BlurConfiguration>,
   HazeEffectRendererBackdrop<BlurConfiguration>,
   HazeEffectRendererLifecycle<BlurConfiguration>,
@@ -52,7 +52,15 @@ internal class BlurVisualEffect :
   internal val renderEffectCache =
     LruCache<RenderEffectCacheKey, PlatformRenderEffect>(maxSize = 50)
 
-  internal var dirtyTracker: Bitmask by mutableStateOf(Bitmask())
+  /** Bumped when [renderEffectCache] is cleared, so a [BlurRenderEffectSlot] cannot outlive a clear. */
+  internal var renderEffectGeneration: Int = 0
+
+  internal val backdropSlot: BlurRenderEffectSlot = renderEffectSlotFactory()
+
+  private var progressiveBrushMemo: Brush? = null
+
+  /** Whether the resolved style changed since the last draw. */
+  internal var styleChanged: Boolean = false
     private set
 
   private var resolvedStyle: ResolvedHazeBlurStyle =
@@ -99,7 +107,8 @@ internal class BlurVisualEffect :
       scope.invalidateDraw()
     }
     compositionLocalStyle = scope.currentValueOf(LocalHazeBlurStyle)
-    if (dirtyTracker.any(BlurDirtyFields.InvalidateFlags)) {
+    resolveStyle()
+    if (styleChanged) {
       needsDelegateSelection = true
       if (needsLayerBoundsInvalidation) {
         needsLayerBoundsInvalidation = false
@@ -121,7 +130,7 @@ internal class BlurVisualEffect :
   ): HazeEffectBackdrop? {
     return try {
       with(this as DrawScope) { selectDelegateForDraw(this@backdropEffect) }
-      if (delegate !is RenderEffectBlurVisualEffectDelegate) return null
+      if (!delegate.supportsBackdropRenderEffect) return null
 
       HazeEffectBackdrop(
         platformEffect = getOrCreateRenderEffect(
@@ -129,17 +138,18 @@ internal class BlurVisualEffect :
           inputScale = BLUR_FULL_RESOLUTION_SCALE,
           backgroundColor = backgroundColor,
           progressive = progressive,
+          slot = backdropSlot,
         ),
         alpha = alpha,
       )
     } finally {
-      resetDirtyTracker()
+      styleChanged = false
     }
   }
 
   override fun shouldPrepareDraw(style: BlurConfiguration): Boolean {
     if (alpha != 0f) return true
-    resetDirtyTracker()
+    styleChanged = false
     return false
   }
 
@@ -151,12 +161,12 @@ internal class BlurVisualEffect :
         with(delegate) { draw(runtimeScope) }
       }
     } finally {
-      resetDirtyTracker()
+      styleChanged = false
     }
   }
 
   override fun shouldDrawContentBehind(): Boolean {
-    return delegate is ScrimBlurVisualEffectDelegate
+    return delegate.drawsContentBehind
   }
 
   override fun onTrimMemory(level: TrimMemoryLevel) {
@@ -165,29 +175,25 @@ internal class BlurVisualEffect :
   }
 
   override fun canDrawRetainedOutput(): Boolean {
-    return (delegate as? RetainedOutputDelegate)?.canDrawRetainedOutput() == true
+    return delegate.canDrawRetainedOutput()
   }
 
   override fun shouldDrawRetainedOutput(): Boolean {
-    return (delegate as? RetainedOutputDelegate)?.shouldDrawRetainedOutput() == true
+    return delegate.shouldDrawRetainedOutput()
   }
 
   override fun clearRetainedOutput() {
-    (delegate as? RetainedOutputDelegate)?.clearRetainedOutput()
+    delegate.clearRetainedOutput()
   }
 
   override fun invalidateRetainedOutput() {
-    (delegate as? RetainedOutputDelegate)?.invalidateRetainedOutput()
+    delegate.invalidateRetainedOutput()
   }
 
   override fun shouldClipToNodeBounds(): Boolean = blurredEdgeTreatment.isBounded()
 
   override fun dispose() {
     detach()
-  }
-
-  private fun resetDirtyTracker() {
-    dirtyTracker = Bitmask()
   }
 
   private fun DrawScope.selectDelegateForDraw(context: HazeEffectRuntimeDrawScope) {
@@ -209,25 +215,20 @@ internal class BlurVisualEffect :
   internal val blurredEdgeTreatment: BlurredEdgeTreatment
     get() = resolvedStyle.blurredEdgeTreatment
 
-  internal fun resolveInputScaleFactor(): Float = performanceMode.resolveBlurInputScale()
+  /** The brush for [progressive], built once per progressive configuration. */
+  internal val progressiveBrush: Brush?
+    get() {
+      val progressive = progressive ?: return null
+      return progressiveBrushMemo ?: progressiveBrushFactory(progressive).also {
+        progressiveBrushMemo = it
+      }
+    }
+
+  internal fun resolveInputScaleFactor(): Float = constrainInputScaleForBrushes(performanceMode.resolveBlurInputScale())
 
   private var compositionLocalStyle: HazeBlurStyle = HazeBlurStyle
-    set(value) {
-      if (field !== value) {
-        HazeLogger.d(TAG) { "LocalHazeBlurStyle changed. Current: $field. New: $value" }
-        field = value
-        resolveStyle()
-      }
-    }
 
   private var style: HazeBlurStyle = HazeBlurStyle
-    set(value) {
-      if (field !== value) {
-        HazeLogger.d(TAG) { "style changed. Current: $field. New: $value" }
-        field = value
-        resolveStyle()
-      }
-    }
 
   internal var performanceMode: HazePerformanceMode = HazePerformanceMode.Default
     private set(value) {
@@ -259,33 +260,17 @@ internal class BlurVisualEffect :
     old: ResolvedHazeBlurStyle,
     new: ResolvedHazeBlurStyle,
   ) {
-    if (old.blurEnabled != new.blurEnabled) dirtyTracker += BlurDirtyFields.BlurEnabled
-    if (old.blurRadius != new.blurRadius) {
-      dirtyTracker += BlurDirtyFields.BlurRadius
+    styleChanged = true
+    if (old.progressive != new.progressive) {
+      progressiveBrushMemo = null
+    }
+    if (
+      old.blurRadius != new.blurRadius ||
+      old.backgroundColor.prefersClipToAreaBounds() !=
+      new.backgroundColor.prefersClipToAreaBounds() ||
+      old.blurredEdgeTreatment.isBounded() != new.blurredEdgeTreatment.isBounded()
+    ) {
       needsLayerBoundsInvalidation = true
-    }
-    if (old.noiseFactor != new.noiseFactor) dirtyTracker += BlurDirtyFields.NoiseFactor
-    if (old.mask != new.mask) dirtyTracker += BlurDirtyFields.Mask
-    if (old.backgroundColor != new.backgroundColor) {
-      dirtyTracker += BlurDirtyFields.BackgroundColor
-      if (
-        old.backgroundColor.prefersClipToAreaBounds() !=
-        new.backgroundColor.prefersClipToAreaBounds()
-      ) {
-        needsLayerBoundsInvalidation = true
-      }
-    }
-    if (old.colorEffects != new.colorEffects) dirtyTracker += BlurDirtyFields.ColorEffects
-    if (old.fallbackColorEffect != new.fallbackColorEffect) {
-      dirtyTracker += BlurDirtyFields.FallbackColorEffect
-    }
-    if (old.alpha != new.alpha) dirtyTracker += BlurDirtyFields.Alpha
-    if (old.progressive != new.progressive) dirtyTracker += BlurDirtyFields.Progressive
-    if (old.blurredEdgeTreatment != new.blurredEdgeTreatment) {
-      dirtyTracker += BlurDirtyFields.BlurredEdgeTreatment
-      if (old.blurredEdgeTreatment.isBounded() != new.blurredEdgeTreatment.isBounded()) {
-        needsLayerBoundsInvalidation = true
-      }
     }
   }
 
@@ -294,6 +279,19 @@ internal class BlurVisualEffect :
     fun DrawScope.draw(context: HazeEffectRuntimeDrawScope)
     fun detach() = Unit
     fun onTrimMemory(context: HazeEffectLifecycleScope, level: TrimMemoryLevel) = Unit
+
+    /** Whether this delegate draws the content behind the blur itself, rather than the node. */
+    val drawsContentBehind: Boolean get() = false
+
+    /** Whether the backdrop path can use this delegate's RenderEffect. */
+    val supportsBackdropRenderEffect: Boolean get() = false
+
+    fun canDrawRetainedOutput(): Boolean = false
+    fun shouldDrawRetainedOutput(): Boolean = canDrawRetainedOutput()
+    fun clearRetainedOutput() = Unit
+
+    /** See [dev.chrisbanes.haze.HazeEffectRendererRetainedOutput.invalidateRetainedOutput]. */
+    fun invalidateRetainedOutput() = clearRetainedOutput()
   }
 
   internal companion object {
@@ -306,17 +304,6 @@ private fun Color.prefersClipToAreaBounds(): Boolean {
 }
 
 private fun BlurredEdgeTreatment.isBounded(): Boolean = shape != null
-
-internal interface RetainedOutputDelegate {
-  fun canDrawRetainedOutput(): Boolean
-
-  fun shouldDrawRetainedOutput(): Boolean = canDrawRetainedOutput()
-
-  fun clearRetainedOutput()
-
-  /** See [dev.chrisbanes.haze.HazeEffectRendererRetainedOutput.invalidateRetainedOutput]. */
-  fun invalidateRetainedOutput() = clearRetainedOutput()
-}
 
 /** Tracks whether an asynchronously generated Blur output is still valid for presentation. */
 internal class BlurRetainedOutputState {

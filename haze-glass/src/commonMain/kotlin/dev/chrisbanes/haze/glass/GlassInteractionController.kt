@@ -1,20 +1,25 @@
 // Copyright 2026, Christopher Banes and the Haze project contributors
 // SPDX-License-Identifier: Apache-2.0
 
+@file:OptIn(InternalHazeApi::class)
+
 package dev.chrisbanes.haze.glass
 
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.animation.core.VectorConverter
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.interaction.FocusInteraction
 import androidx.compose.foundation.interaction.HoverInteraction
 import androidx.compose.foundation.interaction.InteractionSource
 import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.runtime.MonotonicFrameClock
+import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.MotionDurationScale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.geometry.center
+import androidx.compose.ui.geometry.isFinite
 import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.input.pointer.PointerEvent
 import androidx.compose.ui.input.pointer.PointerEventType
@@ -24,6 +29,7 @@ import androidx.compose.ui.input.pointer.changedToDownIgnoreConsumed
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.positionChangedIgnoreConsumed
 import dev.chrisbanes.haze.HazeEffectLifecycleScope
+import dev.chrisbanes.haze.InternalHazeApi
 import kotlin.coroutines.EmptyCoroutineContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -165,21 +171,22 @@ internal fun selectTransitionSpec(
 
 internal class GlassInteractionController(
   context: HazeEffectLifecycleScope,
+  private val onResponseCompleted: (GlassInteractionController) -> Unit = {},
 ) {
   private val scope = context.coroutineScope
   private val hasFrameClock = scope.coroutineContext[MonotonicFrameClock] != null
   private val sizeProvider = { context.modifierSize }
   private val invalidateDraw = context::invalidateDraw
-  private val lightingIntensity = AnimatedFloatChannel(0f, scope, invalidateDraw)
-  private val refractionMultiplier = AnimatedFloatChannel(1f, scope, invalidateDraw)
-  private val whitePointDelta = AnimatedFloatChannel(0f, scope, invalidateDraw)
-  private val scaleX = AnimatedFloatChannel(1f, scope, invalidateDraw)
-  private val scaleY = AnimatedFloatChannel(1f, scope, invalidateDraw)
+  private val lightingIntensity = AnimatedFloatChannel(0f, scope, invalidateDraw, ::responseCompleted)
+  private val refractionMultiplier = AnimatedFloatChannel(1f, scope, invalidateDraw, ::responseCompleted)
+  private val whitePointDelta = AnimatedFloatChannel(0f, scope, invalidateDraw, ::responseCompleted)
+  private val scaleX = AnimatedFloatChannel(1f, scope, invalidateDraw, ::responseCompleted)
+  private val scaleY = AnimatedFloatChannel(1f, scope, invalidateDraw, ::responseCompleted)
   private val position = Animatable(Offset.Zero, Offset.VectorConverter)
 
   private var configuration = GlassInteractionControllerConfiguration(
     slots = GlassInteractionSlots(),
-    positionAnimationSpec = GlassDefaults.positionAnimationSpec,
+    positionAnimationSpec = GlassDefaults.interactionPositionAnimationSpec,
     reducedMotion = false,
     forceFullMotion = false,
   )
@@ -187,7 +194,11 @@ internal class GlassInteractionController(
   private var positionTarget = Offset.Zero
   private var hasInitialPositionTarget = false
   private var positionJob: Job? = null
+  private var positionJobAnimates = false
   private var primaryPointerId: PointerId? = null
+
+  // The pointer whose raw press was cancelled; a source drag keeps following it until it lifts.
+  private var cancelledPointerId: PointerId? = null
   private var rawHovered = false
   private var rawPressed = false
   private var rawPosition: Offset? = null
@@ -195,11 +206,58 @@ internal class GlassInteractionController(
   private var interactionSource: InteractionSource? = null
   private var sourceJob: Job? = null
   private val sourcePresses = mutableSetOf<PressInteraction.Press>()
+  private val sourceDrags = mutableSetOf<DragInteraction.Start>()
   private val sourceHovers = mutableSetOf<HoverInteraction.Enter>()
   private val sourceFocuses = mutableSetOf<FocusInteraction.Focus>()
   private var sourcePosition: Offset? = null
   private var disposed = false
   private var renderStateSnapshot = GlassInteractionRenderState(Offset.Zero)
+
+  private var declaredTopology = configuration.slots.resolveInteractionTopology()
+  private var renderTopologySnapshot = declaredTopology
+
+  internal val renderTopology: GlassInteractionTopology
+    get() {
+      val declared = declaredTopology
+      val snapshot = renderTopologySnapshot
+      val animatingRefraction = refractionMultiplier.isAnimating
+      // A moving refraction keeps the largest multiplier it reached until it settles.
+      val maxRefractionMultiplier = if (animatingRefraction) {
+        maxOf(snapshot.maxRefractionMultiplier, declared.maxRefractionMultiplier)
+      } else {
+        declared.maxRefractionMultiplier
+      }
+      val hasOptics = declared.hasOptics || refractionMultiplier.isPending || whitePointDelta.isPending
+      val hasLighting = declared.hasLighting || lightingIntensity.isPending
+      if (snapshot.hasOptics == hasOptics &&
+        snapshot.hasLighting == hasLighting &&
+        snapshot.maxRefractionMultiplier == maxRefractionMultiplier
+      ) {
+        return snapshot
+      }
+      return GlassInteractionTopology(
+        hasOptics = hasOptics,
+        hasLighting = hasLighting,
+        maxRefractionMultiplier = maxRefractionMultiplier,
+      ).also { renderTopologySnapshot = it }
+    }
+
+  internal val hasRunningResponseAnimations: Boolean
+    get() = lightingIntensity.isAnimating || refractionMultiplier.isAnimating ||
+      whitePointDelta.isAnimating || scaleX.isAnimating || scaleY.isAnimating
+
+  internal val hasPendingResponseWork: Boolean
+    get() = lightingIntensity.isPending || refractionMultiplier.isPending ||
+      whitePointDelta.isPending || scaleX.isPending || scaleY.isPending
+
+  private fun responseCompleted() {
+    if (!disposed) {
+      if (positionJobAnimates && positionJob?.isActive == true && !hasPendingResponseWork) {
+        retargetPosition(positionTarget)
+      }
+      onResponseCompleted(this)
+    }
+  }
 
   internal val configurationForTest: GlassInteractionControllerConfiguration
     get() = configuration
@@ -210,8 +268,13 @@ internal class GlassInteractionController(
       sourceHovered = sourceHovers.isNotEmpty(),
       sourceFocused = sourceFocuses.isNotEmpty(),
       rawPressed = rawPressed,
-      sourcePressed = sourcePresses.isNotEmpty(),
+      sourcePressed = sourcePresses.isNotEmpty() || sourceDrags.isNotEmpty(),
     )
+
+  /** [renderState]'s [GlassInteractionRenderState.hasTransform], reading only the scale channels. */
+  val hasTransform: Boolean
+    get() = !configuration.reducedMotion &&
+      (scaleX.currentValue.validScaleForRender() != 1f || scaleY.currentValue.validScaleForRender() != 1f)
 
   val renderState: GlassInteractionRenderState
     get() {
@@ -219,8 +282,8 @@ internal class GlassInteractionController(
       val lightingIntensity = lightingIntensity.currentValue
       val refractionMultiplier = refractionMultiplier.currentValue
       val whitePointDelta = whitePointDelta.currentValue
-      val scaleX = if (configuration.reducedMotion) 1f else scaleX.currentValue
-      val scaleY = if (configuration.reducedMotion) 1f else scaleY.currentValue
+      val scaleX = if (configuration.reducedMotion) 1f else scaleX.currentValue.validScaleForRender()
+      val scaleY = if (configuration.reducedMotion) 1f else scaleY.currentValue.validScaleForRender()
       return renderStateSnapshot.takeIf {
         it.position == position &&
           it.lightingIntensity == lightingIntensity &&
@@ -241,7 +304,10 @@ internal class GlassInteractionController(
   fun updateConfiguration(configuration: GlassInteractionControllerConfiguration) {
     if (disposed || configuration == this.configuration) return
     val previous = this.configuration
+    // Latch the exit's refraction maximum against the outgoing declarations.
+    renderTopology
     this.configuration = configuration
+    if (previous.slots != configuration.slots) declaredTopology = configuration.slots.resolveInteractionTopology()
     val forceFullMotionChanged = previous.forceFullMotion != configuration.forceFullMotion
     val positionAnimationSpecChanged =
       previous.positionAnimationSpec != configuration.positionAnimationSpec
@@ -279,7 +345,7 @@ internal class GlassInteractionController(
     retargetPosition(position)
   }
 
-  fun onPointerEvent(event: PointerEvent, size: Size) {
+  fun onPointerEvent(event: PointerEvent, size: Size, touchSlop: Float) {
     if (disposed) return
     val hasDrawableSize = size.isDrawable()
     var directPosition: Offset? = null
@@ -312,7 +378,16 @@ internal class GlassInteractionController(
     }
 
     if (primaryPointerId == null) {
+      cancelledPointerId?.let { id ->
+        event.changes.firstOrNull { it.id == id }?.let { change ->
+          if (hasDrawableSize && sourceDrags.isNotEmpty()) {
+            directPosition = captureRawPosition(change.position, size)
+          }
+          if (change.changedToUpIgnoreConsumed()) cancelledPointerId = null
+        }
+      }
       event.changes.firstOrNull { it.changedToDownIgnoreConsumed() }?.let { change ->
+        cancelledPointerId = null
         primaryPointerId = change.id
         rawPressed = true
         if (hasDrawableSize) {
@@ -327,6 +402,9 @@ internal class GlassInteractionController(
         if (change.changedToUpIgnoreConsumed()) {
           primaryPointerId = null
           rawPressed = false
+        } else if (hasDrawableSize && change.position.isOutsideBounds(size, touchSlop)) {
+          // Same shape as Compose's isOutOfBounds, with touch slop as the margin.
+          cancelRawPress()
         }
       }
     }
@@ -338,6 +416,7 @@ internal class GlassInteractionController(
     if (disposed) return
     rawHovered = false
     cancelRawPress()
+    cancelledPointerId = null
     updateSignalsAndPosition(size)
   }
 
@@ -351,6 +430,7 @@ internal class GlassInteractionController(
     sourceJob = null
     interactionSource = source
     sourcePresses.clear()
+    sourceDrags.clear()
     sourceHovers.clear()
     sourceFocuses.clear()
     sourcePosition = null
@@ -374,6 +454,10 @@ internal class GlassInteractionController(
               sourcePresses -= interaction.press
               updateSourcePosition()
             }
+
+            is DragInteraction.Start -> sourceDrags += interaction
+            is DragInteraction.Stop -> sourceDrags -= interaction.start
+            is DragInteraction.Cancel -> sourceDrags -= interaction.start
 
             is HoverInteraction.Enter -> sourceHovers += interaction
             is HoverInteraction.Exit -> sourceHovers -= interaction.enter
@@ -401,6 +485,7 @@ internal class GlassInteractionController(
     sourceJob = null
     interactionSource = null
     sourcePresses.clear()
+    sourceDrags.clear()
     sourceHovers.clear()
     sourceFocuses.clear()
     sourcePosition = null
@@ -417,6 +502,7 @@ internal class GlassInteractionController(
     position.validOrNull()?.clampTo(size)?.also { rawPosition = it }
 
   private fun cancelRawPress() {
+    cancelledPointerId = primaryPointerId
     primaryPointerId = null
     rawPressed = false
   }
@@ -440,6 +526,10 @@ internal class GlassInteractionController(
         target = (rawPosition ?: sourcePosition ?: size.center).clampTo(size),
         immediate = rawPosition != null,
       )
+      sourceDrags.isNotEmpty() -> retargetPosition(
+        target = (rawPosition ?: size.center).clampTo(size),
+        immediate = rawPosition != null,
+      )
       sourcePresses.isNotEmpty() -> updatePosition(
         (sourcePosition ?: rawPosition ?: size.center).clampTo(size),
       )
@@ -461,8 +551,8 @@ internal class GlassInteractionController(
     restartForMotionPolicy: Boolean,
   ) {
     val targets = resolveGlassInteractionTargets(nextSlots, nextSignals)
-    lightingIntensity.retarget(
-      targets.lightingIntensity,
+    fun AnimatedFloatChannel.retargetTo(target: OwnedGlassResponseValue) = retarget(
+      target,
       previousSlots,
       nextSlots,
       previousSignals,
@@ -471,46 +561,11 @@ internal class GlassInteractionController(
       configuration.forceFullMotion,
       restartForMotionPolicy,
     )
-    refractionMultiplier.retarget(
-      targets.refractionMultiplier,
-      previousSlots,
-      nextSlots,
-      previousSignals,
-      nextSignals,
-      configuration.reducedMotion,
-      configuration.forceFullMotion,
-      restartForMotionPolicy,
-    )
-    whitePointDelta.retarget(
-      targets.whitePointDelta,
-      previousSlots,
-      nextSlots,
-      previousSignals,
-      nextSignals,
-      configuration.reducedMotion,
-      configuration.forceFullMotion,
-      restartForMotionPolicy,
-    )
-    scaleX.retarget(
-      targets.scaleX,
-      previousSlots,
-      nextSlots,
-      previousSignals,
-      nextSignals,
-      configuration.reducedMotion,
-      configuration.forceFullMotion,
-      restartForMotionPolicy,
-    )
-    scaleY.retarget(
-      targets.scaleY,
-      previousSlots,
-      nextSlots,
-      previousSignals,
-      nextSignals,
-      configuration.reducedMotion,
-      configuration.forceFullMotion,
-      restartForMotionPolicy,
-    )
+    lightingIntensity.retargetTo(targets.lightingIntensity)
+    refractionMultiplier.retargetTo(targets.refractionMultiplier)
+    whitePointDelta.retargetTo(targets.whitePointDelta)
+    scaleX.retargetTo(targets.scaleX)
+    scaleY.retargetTo(targets.scaleY)
   }
 
   private fun snapActiveTargetsForReducedMotion() {
@@ -527,25 +582,27 @@ internal class GlassInteractionController(
     force: Boolean = false,
     immediate: Boolean = false,
   ) {
-    if (!hasInitialPositionTarget) {
-      hasInitialPositionTarget = true
-      positionTarget = target
-      positionJob?.cancel()
-      positionJob = scope.launch {
-        position.snapTo(target)
-        invalidateDraw()
-      }
+    // The position has no visual effect while all response channels are at rest. Keep the
+    // next interaction's starting point current without animating idle layout-size changes.
+    val affectsRendering = Snapshot.withoutReadObservation { hasPendingResponseWork }
+    val stopIdleAnimation = !affectsRendering && positionJobAnimates && positionJob?.isActive == true
+    if (hasInitialPositionTarget && !force && !stopIdleAnimation &&
+      target == positionTarget && (!immediate || position.value == target)
+    ) {
       return
     }
-    if (!force && target == positionTarget && (!immediate || position.value == target)) return
+    val animate = hasInitialPositionTarget && affectsRendering &&
+      !immediate && !configuration.reducedMotion && hasFrameClock
+    hasInitialPositionTarget = true
     positionTarget = target
     positionJob?.cancel()
+    positionJobAnimates = animate
     positionJob = scope.launch(
       if (configuration.forceFullMotion) FullMotionDurationScale else EmptyCoroutineContext,
     ) {
-      if (immediate || configuration.reducedMotion || !hasFrameClock) {
+      if (!animate) {
         position.snapTo(target)
-        invalidateDraw()
+        if (affectsRendering) invalidateDraw()
       } else {
         position.animateTo(target, configuration.positionAnimationSpec) {
           invalidateDraw()
@@ -556,17 +613,22 @@ internal class GlassInteractionController(
 }
 
 private class AnimatedFloatChannel(
-  identity: Float,
+  private val identity: Float,
   private val scope: CoroutineScope,
   private val invalidateDraw: () -> Unit,
+  private val onCompleted: () -> Unit,
 ) {
   private val hasFrameClock = scope.coroutineContext[MonotonicFrameClock] != null
   private val value = Animatable(identity)
   private var owner = OwnedGlassResponseValue(null, null, null, identity)
   private var animationSpec: FiniteAnimationSpec<Float>? = null
   private var job: Job? = null
+  private var workRevision = 0L
+  private var hasPendingAnimation = false
 
   val currentValue: Float get() = value.value
+  val isAnimating: Boolean get() = hasPendingAnimation || value.isRunning
+  val isPending: Boolean get() = isAnimating || currentValue != identity
 
   fun retarget(
     target: OwnedGlassResponseValue,
@@ -604,7 +666,9 @@ private class AnimatedFloatChannel(
     reducedMotion: Boolean,
     forceFullMotion: Boolean,
   ) {
+    val revision = ++workRevision
     job?.cancel()
+    hasPendingAnimation = true
     job = scope.launch(if (forceFullMotion) FullMotionDurationScale else EmptyCoroutineContext) {
       if (reducedMotion || spec == null || !hasFrameClock) {
         value.snapTo(target)
@@ -614,27 +678,40 @@ private class AnimatedFloatChannel(
           invalidateDraw()
         }
       }
+      if (revision == workRevision) {
+        hasPendingAnimation = false
+        // The final value was drawn by the last animation frame; the owner decides on any redraw.
+        onCompleted()
+      }
     }
   }
 
   fun snapTo(target: OwnedGlassResponseValue) {
     owner = target
     animationSpec = null
-    job?.cancel()
-    job = scope.launch {
-      value.snapTo(target.value)
-      invalidateDraw()
-    }
+    launchAnimation(target.value, null, reducedMotion = true, forceFullMotion = false)
   }
 
   fun cancel() {
+    workRevision++
+    hasPendingAnimation = false
     job?.cancel()
     job = null
   }
 }
 
-private object FullMotionDurationScale : MotionDurationScale {
+internal object FullMotionDurationScale : MotionDurationScale {
   override val scaleFactor: Float = 1f
 }
 
-private fun Offset.validOrNull(): Offset? = takeIf { x.isFinite() && y.isFinite() }
+private fun Offset.validOrNull(): Offset? = takeIf { isFinite }
+
+private fun Offset.isOutsideBounds(size: Size, slop: Float): Boolean =
+  isFinite && (x < -slop || x > size.width + slop || y < -slop || y > size.height + slop)
+
+// Accepted spring targets can overshoot; constrain derived samples without changing authored validation.
+internal fun Float.validScaleForRender(): Float = when {
+  !isFinite() -> 1f
+  this > 0f -> this
+  else -> Float.MIN_VALUE
+}

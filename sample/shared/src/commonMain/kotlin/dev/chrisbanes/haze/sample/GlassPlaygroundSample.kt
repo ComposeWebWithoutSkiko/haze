@@ -1,8 +1,6 @@
 // Copyright 2026, Christopher Banes and the Haze project contributors
 // SPDX-License-Identifier: Apache-2.0
 
-@file:OptIn(ExperimentalHazeApi::class)
-
 package dev.chrisbanes.haze.sample
 
 import androidx.compose.animation.AnimatedVisibility
@@ -61,7 +59,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.lerp
 import androidx.compose.ui.zIndex
 import androidx.navigation.NavHostController
-import dev.chrisbanes.haze.ExperimentalHazeApi
 import dev.chrisbanes.haze.HazeInput
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.glass.GlassReducedMotionPolicy
@@ -312,7 +309,9 @@ public fun GlassPlaygroundSampleContent(
         )
         GlassSurface(
           hazeState = hazeState,
-          style = GlassStyle.regular.then { tint(Color.Black.copy(alpha = 0.08f)) },
+          style = remember {
+            GlassStyle.regular.then { tint(Color.Black.copy(alpha = 0.08f)) }
+          },
           shape = RoundedCornerShape(28.dp),
         ) {
           Row(
@@ -469,10 +468,13 @@ private fun PlaygroundSurface(
   }
   val interactionSource = interactionSourceProvider(id)
   var lightPosition by remember(id) { mutableStateOf<Alignment>(Alignment.Center) }
-  val style = selectedStyle.style.material3().then {
-    shape(glassPlaygroundShape(id))
-    lightPosition(lightPosition)
-  }.then(playgroundInteractionStyle())
+  val materialStyle = selectedStyle.style.material3()
+  val style = remember(materialStyle, id) {
+    materialStyle.then {
+      shape(glassPlaygroundShape(id))
+      lightPosition(lightPosition)
+    }.then(playgroundInteractionStyle())
+  }
   val latestProgressProvider by rememberUpdatedState(progressProvider)
   val latestSurfaceProgressProvider by rememberUpdatedState(surfaceProgressProvider)
   val latestReturnFractionProvider by rememberUpdatedState(returnFractionProvider)

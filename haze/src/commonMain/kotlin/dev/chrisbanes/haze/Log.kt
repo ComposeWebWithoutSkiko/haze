@@ -15,28 +15,38 @@ public object HazeLogger {
    */
   public var enabled: Boolean = false
 
-  /** Logs the lazily produced [message] under [tag] when [enabled]. */
+  /**
+   * Logs the lazily produced [message] under [tag] when [enabled]. The [enabled] check is inlined,
+   * so a capturing [message] allocates nothing at the call site while logging is disabled.
+   */
   @InternalHazeApi
-  public fun d(tag: String, message: () -> String) {
-    d(tag = tag, throwable = null, message = message)
+  public inline fun d(tag: String, crossinline message: () -> String) {
+    if (enabled) logEnabled(tag, null) { message() }
   }
 
-  /** Logs [throwable] and the lazily produced [message] under [tag] when [enabled]. */
+  /**
+   * Logs [throwable] and the lazily produced [message] under [tag] when [enabled]. The [enabled]
+   * check is inlined, so a capturing [message] allocates nothing at the call site while logging is
+   * disabled.
+   */
   @InternalHazeApi
-  public fun d(tag: String, throwable: Throwable?, message: () -> String) {
-    if (enabled) {
-      Snapshot.withoutReadObservation {
-        platformLog(
-          tag = tag,
-          message = buildString {
-            append(message())
-            if (throwable != null) {
-              append(". Throwable: ")
-              append(throwable)
-            }
-          },
-        )
-      }
+  public inline fun d(tag: String, throwable: Throwable?, crossinline message: () -> String) {
+    if (enabled) logEnabled(tag, throwable) { message() }
+  }
+
+  @PublishedApi
+  internal fun logEnabled(tag: String, throwable: Throwable?, message: () -> String) {
+    Snapshot.withoutReadObservation {
+      platformLog(
+        tag = tag,
+        message = buildString {
+          append(message())
+          if (throwable != null) {
+            append(". Throwable: ")
+            append(throwable)
+          }
+        },
+      )
     }
   }
 }

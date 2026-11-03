@@ -5,12 +5,19 @@
 
 package dev.chrisbanes.haze
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.ObserverHandle
 import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.isUnspecified
+import androidx.compose.ui.graphics.LayerOutsets
 import androidx.compose.ui.graphics.drawscope.ContentDrawScope
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.graphics.layer.CompositingStrategy
 import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.Measurable
@@ -32,6 +39,7 @@ import androidx.compose.ui.node.updateLayerBlock
 import androidx.compose.ui.platform.LocalGraphicsContext
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.toSize
+import kotlin.math.ceil
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -49,6 +57,8 @@ internal class HazeSourceNode(
   state: HazeState,
   zIndex: Float = 0f,
   key: Any? = null,
+  inputSharing: HazeInputSharing = HazeInputSharing.Never,
+  inputSharingOutsets: LayerOutsets = LayerOutsets.Zero,
 ) : Modifier.Node(),
   CompositionLocalConsumerModifierNode,
   GlobalPositionAwareModifierNode,
@@ -102,6 +112,10 @@ internal class HazeSourceNode(
   init {
     this.key = key
   }
+
+  // State, so draw observes it: invalidateDraw() alone does not re-run this node's draw.
+  internal var inputSharing: HazeInputSharing by mutableStateOf(inputSharing)
+  internal var inputSharingOutsets: LayerOutsets by mutableStateOf(inputSharingOutsets)
 
   private var lastCoordinates: LayoutCoordinates? = null
   private var hasCaptureDemand = false
@@ -174,7 +188,8 @@ internal class HazeSourceNode(
     val nodeScope = coroutineScope
 
     // Descendant layer-property changes may not redraw this node, but their snapshot writes
-    // still need to refresh effects hosted in another window.
+    // still need to refresh effects hosted in another window, and on API 31 effects in the same
+    // window too (see observesSameWindowSourceSnapshots).
     snapshotApplyObserver = Snapshot.registerApplyObserver { _, _ ->
       if (!isAttached) return@registerApplyObserver
 
@@ -313,13 +328,41 @@ internal class HazeSourceNode(
             HazeLogger.d(TAG) { "Updated contentLayer in HazeArea: $area" }
           }
 
+        // Reads the consumer count, so crossing the sharing threshold redraws this source. Every
+        // draw sets the strategy and outsets, so deactivating restores normal compositing.
+        val sharing = inputSharing.isActive(area.captureConsumerCount)
+        // Offscreen, so the content renders once for the window and every effect.
+        contentLayer.compositingStrategy = if (sharing) CompositingStrategy.Offscreen else CompositingStrategy.Auto
+        val outsets = if (sharing) inputSharingOutsets else LayerOutsets.Zero
+        // Rounded outward, so the declared outsets are never cut short.
+        val left = ceil(outsets.left.toPx()).toInt()
+        val top = ceil(outsets.top.toPx()).toInt()
+        val right = ceil(outsets.right.toPx()).toInt()
+        val bottom = ceil(outsets.bottom.toPx()).toInt()
+        contentLayer.setOutsets(left, top, right, bottom)
+        val outsetBounds = if (left == 0 && top == 0 && right == 0 && bottom == 0) {
+          null
+        } else {
+          Rect(-left.toFloat(), -top.toFloat(), size.width + right, size.height + bottom)
+        }
+        area.inputBounds = outsetBounds
+
         // First we draw the composable content into a graphics layer
         trace("HazeSource.record") {
           contentLayer.record {
-            this@draw.drawContentSafely()
+            if (outsetBounds != null) {
+              // Offscreen clips to the layer bounds, but Skia doesn't clip to its outsets. Clip
+              // explicitly, so every platform agrees.
+              clipRect(outsetBounds.left, outsetBounds.top, outsetBounds.right, outsetBounds.bottom) {
+                this@draw.drawContentSafely()
+              }
+            } else {
+              this@draw.drawContentSafely()
+            }
             HazeLogger.d(TAG) { "Drawn content into layer: $contentLayer" }
           }
         }
+
         area.contentVersion++
 
         // Now we draw `content` into the window canvas
@@ -366,11 +409,8 @@ internal class HazeSourceNode(
   }
 
   internal fun HazeArea.releaseLayer() {
-    contentLayer?.let { layer ->
-      HazeLogger.d(TAG) { "Releasing content layer: $layer" }
-      currentValueOf(LocalGraphicsContext).releaseGraphicsLayer(layer)
-    }
-    contentLayer = null
+    // Skips the composition-local read on idle draws, which call this every frame.
+    if (contentLayer != null) releaseContentLayer(currentValueOf(LocalGraphicsContext))
   }
 
   private companion object {

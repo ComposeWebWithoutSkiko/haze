@@ -15,6 +15,8 @@ import dev.chrisbanes.haze.createBlendRenderEffect
 import dev.chrisbanes.haze.createFractalNoiseShader
 import dev.chrisbanes.haze.createShaderRenderEffect
 
+internal actual fun BlurVisualEffect.constrainInputScaleForBrushes(scale: Float): Float = scale
+
 private val NOISE_SHADER by lazy(LazyThreadSafetyMode.NONE) {
   createFractalNoiseShader(
     baseFrequencyX = 0.45f,

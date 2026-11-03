@@ -9,9 +9,10 @@ pluginManagement {
 
   repositories {
     google {
-      content {
-        includeGroupByRegex(".*google.*")
-        includeGroupByRegex(".*android.*")
+      mavenContent {
+        includeGroupAndSubgroups("androidx")
+        includeGroupAndSubgroups("com.android")
+        includeGroupAndSubgroups("com.google")
       }
     }
     mavenCentral()
@@ -39,7 +40,7 @@ dependencyResolutionManagement {
 }
 
 plugins {
-  id("com.gradle.develocity") version "4.6.0"
+  id("com.gradle.develocity") version "4.6.1"
 }
 
 val isCi: Boolean get() = !System.getenv("CI").isNullOrEmpty()

@@ -16,6 +16,8 @@ plugins {
 kotlin {
   android {
     namespace = "dev.chrisbanes.haze.utils"
+
+    withHostTest {}
   }
 
   addDefaultHazeTargets(project, withSkikoMain = true)
@@ -37,6 +39,14 @@ kotlin {
     webMain {
       dependencies {
         implementation(libs.compose.ui.web.canvas)
+      }
+    }
+
+    named("androidHostTest") {
+      dependencies {
+        implementation(kotlin("test"))
+        implementation(libs.assertk)
+        implementation(projects.internal.contextTest)
       }
     }
   }

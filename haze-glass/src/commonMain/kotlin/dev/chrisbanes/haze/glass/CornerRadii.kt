@@ -7,7 +7,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.LayoutDirection
 import kotlin.math.min
@@ -65,22 +64,32 @@ internal fun RoundedCornerShape.toValidCornerRadiiPxOrNull(
   val bottomEndPx = bottomEnd.toPx(layerSize, density)
   val bottomStartPx = bottomStart.toPx(layerSize, density)
   if (
-    !topStartPx.isFinite() || topStartPx < 0f ||
-    !topEndPx.isFinite() || topEndPx < 0f ||
-    !bottomEndPx.isFinite() || bottomEndPx < 0f ||
-    !bottomStartPx.isFinite() || bottomStartPx < 0f
+    !topStartPx.isFinite() || !topEndPx.isFinite() ||
+    !bottomEndPx.isFinite() || !bottomStartPx.isFinite()
   ) {
     return null
   }
+  // Negative radii, such as animation overshoot, are treated as square corners.
   return toPhysicalCornerRadiiPx(
-    topStartPx,
-    topEndPx,
-    bottomEndPx,
-    bottomStartPx,
+    topStartPx.coerceAtLeast(0f),
+    topEndPx.coerceAtLeast(0f),
+    bottomEndPx.coerceAtLeast(0f),
+    bottomStartPx.coerceAtLeast(0f),
     layerSize,
     layoutDirection,
   )
 }
+
+/** Falls back from an invalid or missing shape to [GlassDefaults.shape], then to square corners. */
+internal fun RoundedCornerShape?.resolveCornerRadiiPx(
+  layerSize: Size,
+  density: Density,
+  layoutDirection: LayoutDirection,
+): CornerRadii = this?.toValidCornerRadiiPxOrNull(layerSize, density, layoutDirection)
+  ?.takeIf { it.isFiniteAndNonNegative() }
+  ?: GlassDefaults.shape.toCornerRadiiPx(layerSize, density, layoutDirection)
+    .takeIf { it.isFiniteAndNonNegative() }
+  ?: CornerRadii.zero
 
 private fun toPhysicalCornerRadiiPx(
   initialTopStartPx: Float,
@@ -159,5 +168,3 @@ internal fun CornerRadii.toRoundRect(size: Size): RoundRect = RoundRect(
   bottomRightCornerRadius = CornerRadius(bottomRight),
   bottomLeftCornerRadius = CornerRadius(bottomLeft),
 )
-
-internal fun CornerRadii.toPath(size: Size): Path = Path().apply { addRoundRect(toRoundRect(size)) }

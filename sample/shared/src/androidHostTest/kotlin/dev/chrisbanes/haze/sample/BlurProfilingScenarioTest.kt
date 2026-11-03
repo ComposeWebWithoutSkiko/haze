@@ -1,21 +1,20 @@
 // Copyright 2026, Christopher Banes and the Haze project contributors
 // SPDX-License-Identifier: Apache-2.0
 
-@file:OptIn(ExperimentalHazeApi::class)
-
 package dev.chrisbanes.haze.sample
 
+import androidx.compose.ui.unit.dp
 import assertk.assertThat
 import assertk.assertions.isEqualTo
 import assertk.assertions.isNotEqualTo
-import dev.chrisbanes.haze.ExperimentalHazeApi
+import assertk.assertions.isNull
 import dev.chrisbanes.haze.HazePerformanceMode
 import kotlin.test.Test
 
 class BlurProfilingScenarioTest {
   @Test
   fun matrix_exposesEachNamedModeForStableAndSourceChangingWorkloads() {
-    assertThat(BlurProfilingScenario.entries.map(BlurProfilingScenario::id)).isEqualTo(
+    assertThat(BlurProfilingScenario.entries.filter { it.noiseTintProperty == null && it.sourceScrollEffects == 0 }.map(BlurProfilingScenario::id)).isEqualTo(
       listOf(
         "stable_quality",
         "backdrop_stable_quality",
@@ -31,7 +30,7 @@ class BlurProfilingScenarioTest {
     )
 
     assertThat(
-      BlurProfilingScenario.entries.groupBy(BlurProfilingScenario::updatesSource)
+      BlurProfilingScenario.entries.filter { it.noiseTintProperty == null && it.sourceScrollEffects == 0 }.groupBy(BlurProfilingScenario::updatesSource)
         .mapValues { (_, scenarios) -> scenarios.map(BlurProfilingScenario::performanceMode) },
     ).isEqualTo(
       mapOf(
@@ -51,6 +50,63 @@ class BlurProfilingScenarioTest {
         ),
       ),
     )
+  }
+
+  @Test
+  fun noiseTintMatrix_changesOnlySelectedPropertyAndKeepsIndependentNodes() {
+    val scenarios = BlurProfilingScenario.entries.filter { it.noiseTintProperty != null }
+    assertThat(scenarios.map { it.id }).isEqualTo(
+      listOf(
+        "noise_tint_stable_1",
+        "noise_tint_stable_3",
+        "noise_tint_tint_1",
+        "noise_tint_tint_3",
+        "noise_tint_radius_1",
+        "noise_tint_radius_3",
+        "noise_tint_noise_1",
+        "noise_tint_noise_3",
+      ),
+    )
+    for (scenario in scenarios) {
+      assertThat(scenario.performanceMode).isEqualTo(HazePerformanceMode.Quality)
+      assertThat(scenario.usesBackdrop).isEqualTo(false)
+      assertThat(scenario.updatesSource).isEqualTo(false)
+      val start = List(scenario.noiseTintNodes) { blurNoiseTintParameters(scenario, 0f, it) }
+      assertThat(start.toSet().size).isEqualTo(scenario.noiseTintNodes)
+      for (node in start.indices) for (progress in listOf(0.5f, 1f)) {
+        val later = blurNoiseTintParameters(scenario, progress, node)
+        if (scenario.noiseTintProperty == BlurNoiseTintProperty.Radius) {
+          assertThat(later.radius).isNotEqualTo(start[node].radius)
+        } else {
+          assertThat(later.radius).isEqualTo(start[node].radius)
+        }
+        if (scenario.noiseTintProperty == BlurNoiseTintProperty.Noise) {
+          assertThat(later.noise).isNotEqualTo(start[node].noise)
+        } else {
+          assertThat(later.noise).isEqualTo(start[node].noise)
+        }
+        if (scenario.noiseTintProperty == BlurNoiseTintProperty.Tint) {
+          assertThat(later.tint).isNotEqualTo(start[node].tint)
+        } else {
+          assertThat(later.tint).isEqualTo(start[node].tint)
+        }
+      }
+    }
+  }
+
+  @Test
+  fun sourceScroll_movesSourceWithConstantConfiguration() {
+    val scenarios = BlurProfilingScenario.entries.filter { it.sourceScrollEffects > 0 }
+    assertThat(scenarios.map { it.id }).isEqualTo(listOf("source_scroll_balanced", "source_scroll_balanced_9"))
+    assertThat(scenarios.map { it.sourceScrollEffects }).isEqualTo(listOf(1, 9))
+    for (scenario in scenarios) {
+      assertThat(scenario.performanceMode, name = scenario.id).isEqualTo(HazePerformanceMode.Balanced)
+      assertThat(scenario.updatesSource, name = scenario.id).isEqualTo(false)
+      assertThat(scenario.noiseTintProperty, name = scenario.id).isNull()
+    }
+    assertThat(profilingSourceScrollOffset(0.25f)).isNotEqualTo(profilingSourceScrollOffset(0.5f))
+    assertThat(profilingSourceScrollOffset(0f)).isEqualTo(0.dp)
+    assertThat(profilingSourceScrollOffset(1f)).isEqualTo(0.dp)
   }
 
   @Test
